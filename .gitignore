@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# Local UrielScan database, reports & downloaded binaries
+data/*.db*
+data/*.sqlite*
+reports/*.html
+reports/*.pdf
+reports/*.docx
+bin/*
+!bin/.gitkeep
+!data/.gitkeep
+!reports/.gitkeep
+
+# Node / Frontend
+frontend/node_modules/
+*.log
