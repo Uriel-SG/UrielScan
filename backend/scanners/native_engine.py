@@ -252,8 +252,9 @@ async def run_native_net_scan(
     ports_to_scan = ports or COMMON_PORTS
     raw_entries = [t.strip() for t in targets.replace(",", " ").split() if t.strip()]
 
-    # Expand CIDR subnets if passed directly to native_net_scan
+    # Expand CIDR subnets lazily (prevent memory exhaustion on /8 or IPv6 /64)
     import ipaddress
+    import itertools
     raw_targets: List[str] = []
     for entry in raw_entries:
         is_url = entry.lower().startswith(("http://", "https://"))
@@ -262,7 +263,9 @@ async def run_native_net_scan(
             if slash_p.isdigit():
                 try:
                     net = ipaddress.ip_network(entry, strict=False)
-                    host_ips = [str(ip) for ip in net.hosts()][:256]
+                    host_ips = [str(ip) for ip in itertools.islice(net.hosts(), 256)]
+                    if not host_ips and net.num_addresses == 1:
+                        host_ips = [str(net.network_address)]
                     log("INFO", f"[Native Net] Fast TCP Host Discovery su subnet {entry} ({len(host_ips)} IP)...")
                     sweep_sem = asyncio.Semaphore(128)
                     live_subnet_ips: List[str] = []

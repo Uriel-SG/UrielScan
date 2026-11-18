@@ -1,10 +1,28 @@
 import io
+import re
 import csv
 import base64
 import zipfile
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from xml.sax.saxutils import escape as xml_escape
+
+_XML_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _clean_xml_text(val: Any) -> str:
+    """Strips control chars disallowed in XML 1.0 before escaping."""
+    return _XML_CTRL_CHARS_RE.sub(" ", str(val or ""))
+
+
+def _sanitize_csv_cell(val: Any) -> Any:
+    """Prevents CSV/Excel formula injection (CWE-1236) on cells starting with = + - @ tab CR."""
+    if not isinstance(val, str):
+        return val
+    stripped = val.lstrip()
+    if stripped and stripped[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{val}"
+    return val
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -37,7 +55,7 @@ def _decode_data_url_image(data_url: str) -> Optional[bytes]:
 
 def _safe_para_text(text: Any) -> str:
     """Escapes text for ReportLab Paragraph XML markup."""
-    raw = str(text or "")
+    raw = _clean_xml_text(text)
     return (
         raw.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -101,23 +119,25 @@ def export_scan_results_csv(
         org_name = org_map.get(f.get("org_id"), {}).get("name", f"Org #{f.get('org_id', '')}")
         scan_name = scan_name_map.get(f.get("scan_id"), f"Scan #{f.get('scan_id', '')}")
         writer.writerow([
-            f.get("id", ""),
-            org_name,
-            scan_name,
-            f.get("host", ""),
-            f.get("port", "") or "",
-            f.get("protocol", "tcp"),
-            f.get("service", ""),
-            str(f.get("severity", "info")).upper(),
-            f.get("cvss", 0.0),
-            f.get("title", ""),
-            f.get("source_engine", ""),
-            f.get("status", "open"),
-            f.get("cve_ids", ""),
-            f.get("cwe_id", ""),
-            (f.get("description") or "").replace("\r\n", " ").replace("\n", " "),
-            (f.get("remediation") or "").replace("\r\n", " ").replace("\n", " "),
-            (f.get("evidence") or "").replace("\r\n", " | ").replace("\n", " | "),
+            _sanitize_csv_cell(col) for col in [
+                f.get("id", ""),
+                org_name,
+                scan_name,
+                f.get("host", ""),
+                f.get("port", "") or "",
+                f.get("protocol", "tcp"),
+                f.get("service", ""),
+                str(f.get("severity", "info")).upper(),
+                f.get("cvss", 0.0),
+                f.get("title", ""),
+                f.get("source_engine", ""),
+                f.get("status", "open"),
+                f.get("cve_ids", ""),
+                f.get("cwe_id", ""),
+                (f.get("description") or "").replace("\r\n", " ").replace("\n", " "),
+                (f.get("remediation") or "").replace("\r\n", " ").replace("\n", " "),
+                (f.get("evidence") or "").replace("\r\n", " | ").replace("\n", " | "),
+            ]
         ])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
@@ -366,13 +386,16 @@ def generate_pdf_document(
     story.append(Spacer(1, 4 * mm))
 
     # AI or Standard Template Section
-    if include_ai and ai_analysis and (ai_analysis.get("executive_summary") or ai_analysis.get("remediation_plan")):
+    if include_ai and isinstance(ai_analysis, dict) and (ai_analysis.get("executive_summary") or ai_analysis.get("remediation_plan")):
         story.append(Paragraph("2. Analisi Strategica & Remediation" if is_it else "2. Strategic Analysis & Remediation", h2_style))
         if ai_analysis.get("executive_summary"):
             story.append(Paragraph(_safe_para_text(ai_analysis["executive_summary"]), body_style))
             story.append(Spacer(1, 2 * mm))
-        for rp in ai_analysis.get("remediation_plan", [])[:8]:
-            story.append(Paragraph(f"• <b>[{_safe_para_text(rp.get('priority', 'P1'))}]</b> {_safe_para_text(rp.get('action', ''))}", body_style))
+        for rp in (ai_analysis.get("remediation_plan") or [])[:8]:
+            if isinstance(rp, dict):
+                story.append(Paragraph(f"• <b>[{_safe_para_text(rp.get('priority', 'P1'))}]</b> {_safe_para_text(rp.get('action', ''))}", body_style))
+            elif rp:
+                story.append(Paragraph(f"• {_safe_para_text(rp)}", body_style))
         story.append(Spacer(1, 3 * mm))
     else:
         story.append(Paragraph("2. Piano di Intervento Consigliato (Template Standard)" if is_it else "2. Recommended Action Plan (Standard Template)", h2_style))
@@ -501,7 +524,7 @@ def generate_docx_report(
 
     def p_xml(text: str, bold: bool = False, size_half_pt: int = 21, color_hex: str = "1F2937", space_after: int = 100) -> str:
         b_tag = "<w:b/>" if bold else ""
-        lines = str(text or "").split("\n")
+        lines = _clean_xml_text(text).split("\n")
         runs = []
         for idx, line in enumerate(lines):
             br = "<w:br/>" if idx > 0 else ""
@@ -602,17 +625,20 @@ def generate_docx_report(
         "2. Analisi & Piano di Remediation (Sezione Modificabile)" if is_it else "2. Analysis & Remediation Plan (Editable Section)",
         level=2
     ))
-    if include_ai and ai_analysis and (ai_analysis.get("executive_summary") or ai_analysis.get("remediation_plan")):
+    if include_ai and isinstance(ai_analysis, dict) and (ai_analysis.get("executive_summary") or ai_analysis.get("remediation_plan")):
         if ai_analysis.get("executive_summary"):
-            body_parts.append(p_xml(ai_analysis["executive_summary"]))
+            body_parts.append(p_xml(str(ai_analysis["executive_summary"])))
         if is_it:
             rem_rows = [["Priorita", "Azione Consigliata", "Note / Stato (Da Compilare)"]]
             note_default = "Da pianificare"
         else:
             rem_rows = [["Priority", "Recommended Action", "Notes / Status (To be filled)"]]
             note_default = "To be scheduled"
-        for rp in ai_analysis.get("remediation_plan", []):
-            rem_rows.append([str(rp.get("priority", "P1")), str(rp.get("action", "")), note_default])
+        for rp in (ai_analysis.get("remediation_plan") or []):
+            if isinstance(rp, dict):
+                rem_rows.append([str(rp.get("priority", "P1")), str(rp.get("action", "")), note_default])
+            elif rp:
+                rem_rows.append(["P1", str(rp), note_default])
         if len(rem_rows) > 1:
             body_parts.append(table_xml(rem_rows))
     else:

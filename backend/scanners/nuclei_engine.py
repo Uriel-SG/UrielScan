@@ -74,7 +74,7 @@ async def install_nuclei() -> Dict[str, Any]:
     os_map = {
         "windows": "windows",
         "linux": "linux",
-        "darwin": "macOS"
+        "darwin": "macos"
     }
     arch_map = {
         "x86_64": "amd64",
@@ -215,8 +215,9 @@ async def run_nuclei_scan(
             formatted_targets.append(f"http://{t}")
             formatted_targets.append(f"https://{t}")
 
-    # Write target list to temporary file to avoid command-line length limits
-    temp_target_file = BIN_DIR / f"targets_{os.getpid()}.txt"
+    # Write target list to unique temporary file to avoid parallel scan collisions
+    import uuid
+    temp_target_file = BIN_DIR / f"targets_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt"
     with open(temp_target_file, "w", encoding="utf-8") as f:
         for u in formatted_targets:
             f.write(f"{u}\n")
@@ -248,15 +249,22 @@ async def run_nuclei_scan(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            log("ERROR", "Timeout globale Nuclei raggiunto (300s): processo terminato.")
+            return []
     except Exception as e:
         log("ERROR", f"Errore durante l'esecuzione di Nuclei: {str(e)}")
-        if temp_target_file.exists():
-            temp_target_file.unlink()
         return []
-
-    if temp_target_file.exists():
-        temp_target_file.unlink()
+    finally:
+        if temp_target_file.exists():
+            try:
+                temp_target_file.unlink()
+            except Exception:
+                pass
 
     lines = stdout.decode("utf-8", errors="replace").splitlines()
     for line in lines:

@@ -11,9 +11,12 @@ streams progress, and uploads structured Purple Team results.
 import argparse
 import asyncio
 import ipaddress
+import itertools
 import json
 import os
 import platform
+import re
+import shlex
 import shutil
 import socket
 import ssl
@@ -24,6 +27,17 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+_SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9.\-:/\[\]]+$")
+_ALLOWED_NMAP_FLAGS = {
+    "-sV", "-sC", "-sT", "-Pn", "-P0", "-F", "-v", "-n", "--open",
+    "--version-light", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5"
+}
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, f"Redirect blocked ({code} -> {newurl})", headers, fp)
 
 VERSION = "1.0.0"
 
@@ -69,8 +83,12 @@ class ProbeClient:
             data_bytes = json.dumps(payload).encode("utf-8")
 
         req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
+        handlers = [_NoRedirectHandler()]
+        if self.ssl_context is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=self.ssl_context))
+        opener = urllib.request.build_opener(*handlers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=self.ssl_context) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
@@ -386,6 +404,17 @@ def inspect_http_headers(host: str, port: int, insecure: bool = False, timeout: 
 # EXTERNAL SCANNERS: NMAP & NUCLEI
 # ==========================================
 
+def _sanitize_targets(targets_str: str) -> List[str]:
+    clean: List[str] = []
+    for entry in [t.strip() for t in targets_str.replace(",", " ").split() if t.strip()]:
+        if entry.startswith("-"):
+            continue
+        cleaned = re.sub(r"^https?://", "", entry, flags=re.IGNORECASE).split("/")[0] if entry.lower().startswith(("http://", "https://")) else entry
+        if _SAFE_TARGET_RE.match(cleaned) and not cleaned.startswith("-") and cleaned not in clean:
+            clean.append(cleaned)
+    return clean
+
+
 def run_nmap_probe(targets: str, config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     nmap_path = shutil.which("nmap")
     if not nmap_path:
@@ -393,12 +422,22 @@ def run_nmap_probe(targets: str, config: Dict[str, Any]) -> Tuple[List[Dict[str,
 
     cmd = [nmap_path, "-sV", "-oX", "-"]
     flags = config.get("nmap_flags") or config.get("nmap_args")
+    has_pn = False
     if flags:
-        cmd.extend(flags.split())
-    else:
+        raw_flags = shlex.split(flags) if isinstance(flags, str) else [str(x) for x in flags]
+        for tok in raw_flags:
+            if tok in _ALLOWED_NMAP_FLAGS:
+                if tok in ("-Pn", "-P0"):
+                    has_pn = True
+                if tok not in cmd:
+                    cmd.append(tok)
+    if not has_pn:
         cmd.append("-Pn")
 
-    target_list = [t.strip() for t in targets.replace(",", " ").split() if t.strip()]
+    target_list = _sanitize_targets(targets)
+    if not target_list:
+        return [], []
+    cmd.append("--")
     cmd.extend(target_list)
 
     hosts: List[Dict[str, Any]] = []
@@ -544,89 +583,122 @@ async def execute_job(client: ProbeClient, job: Dict[str, Any], insecure: bool =
     hosts: List[Dict[str, Any]] = []
     findings: List[Dict[str, Any]] = []
 
-    # 1. Native Engine
-    if "native" in engines or "native_net" in engines:
-        logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Native Engine] Avvio port scan TCP su target: {targets_str}"})
-        client.update_progress(scan_id, 25, "Scansione porte TCP nativa in corso...", logs)
+    try:
+        # 1. Native Engine
+        if "native" in engines or "native_net" in engines:
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Native Engine] Avvio port scan TCP su target: {targets_str}"})
+            client.update_progress(scan_id, 25, "Scansione porte TCP nativa in corso...", logs)
 
-        raw_targets = [t.strip() for t in targets_str.replace(",", " ").split() if t.strip()]
-        for target in raw_targets:
-            clean_host = target.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
-            try:
-                ip_addr = socket.gethostbyname(clean_host)
-            except Exception:
-                ip_addr = clean_host
+            raw_entries = [t.strip() for t in targets_str.replace(",", " ").split() if t.strip() and not t.strip().startswith("-")]
+            expanded_targets: List[str] = []
+            for entry in raw_entries:
+                is_url = entry.lower().startswith(("http://", "https://"))
+                if not is_url and "/" in entry:
+                    base_p, slash_p = entry.split("/", 1)
+                    if slash_p.isdigit():
+                        try:
+                            net = ipaddress.ip_network(entry, strict=False)
+                            c_ips = [str(ip) for ip in itertools.islice(net.hosts(), 256)]
+                            if not c_ips and net.num_addresses == 1:
+                                c_ips = [str(net.network_address)]
+                            for cip in c_ips:
+                                for qp in (80, 443, 445, 22, 8080, 3389):
+                                    ok, _ = await probe_tcp_port(cip, qp, timeout=0.25)
+                                    if ok:
+                                        expanded_targets.append(cip)
+                                        break
+                            continue
+                        except Exception:
+                            pass
+                expanded_targets.append(entry)
 
-            open_ports = []
-            for p in COMMON_PORTS:
-                is_open, banner = await probe_tcp_port(ip_addr, p)
-                if is_open:
-                    svc = PORT_SERVICE_MAP.get(p, f"port-{p}")
-                    open_ports.append({
-                        "port": p,
-                        "protocol": "tcp",
-                        "service": svc,
-                        "product": banner[:60] if banner else svc,
-                        "version": "",
-                        "state": "open",
-                        "banner": banner
-                    })
-                    findings.append(generate_native_port_finding(clean_host, p, banner, svc))
+            for target in expanded_targets:
+                clean_host = target.replace("http://", "").replace("https://", "").split("/")[0]
+                if ":" in clean_host and not clean_host.startswith("["):
+                    try:
+                        ipaddress.IPv6Address(clean_host)
+                    except Exception:
+                        clean_host = clean_host.split(":")[0]
+                try:
+                    ip_addr = socket.gethostbyname(clean_host)
+                except Exception:
+                    ip_addr = clean_host
 
-            hosts.append({
-                "ip": ip_addr,
-                "hostname": clean_host,
-                "os": "Remote Probe Native Discovery",
-                "ports": open_ports
-            })
+                open_ports = []
+                for p in COMMON_PORTS:
+                    is_open, banner = await probe_tcp_port(ip_addr, p)
+                    if is_open:
+                        svc = PORT_SERVICE_MAP.get(p, f"port-{p}")
+                        open_ports.append({
+                            "port": p,
+                            "protocol": "tcp",
+                            "service": svc,
+                            "product": banner[:60] if banner else svc,
+                            "version": "",
+                            "state": "open",
+                            "banner": banner
+                        })
+                        findings.append(generate_native_port_finding(clean_host, p, banner, svc))
 
-            # SSL checks if 443 open
-            if any(p["port"] in (443, 8443) for p in open_ports):
-                ssl_findings = inspect_ssl(clean_host, port=443)
-                findings.extend(ssl_findings)
+                hosts.append({
+                    "ip": ip_addr,
+                    "hostname": clean_host,
+                    "os": "Remote Probe Native Discovery",
+                    "ports": open_ports
+                })
 
-            # Web header checks
-            for p in open_ports:
-                if p["port"] in (80, 443, 8080, 8443):
-                    hdr_findings = inspect_http_headers(clean_host, port=p["port"], insecure=insecure)
-                    findings.extend(hdr_findings)
+                # SSL checks if 443 or 8443 open
+                for ssl_p in (443, 8443):
+                    if any(p["port"] == ssl_p for p in open_ports):
+                        findings.extend(inspect_ssl(clean_host, port=ssl_p))
 
-        logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Native Engine] Scansione completata. {len(hosts)} host e {len(findings)} finding rilevati."})
+                # Web header checks
+                for p in open_ports:
+                    if p["port"] in (80, 443, 8080, 8443):
+                        hdr_findings = inspect_http_headers(clean_host, port=p["port"], insecure=insecure)
+                        findings.extend(hdr_findings)
 
-    stop = client.update_progress(scan_id, 65, "Scansione nativa completata, verifica moduli esterni...", logs)
-    if stop:
-        print(f"[JOB #{scan_id}] Interrotto dal server.")
-        return
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Native Engine] Scansione completata. {len(hosts)} host e {len(findings)} finding rilevati."})
 
-    # 2. Nmap Engine
-    if "nmap" in engines and shutil.which("nmap"):
-        logs.append({"time": now_time_str(), "level": "INFO", "msg": "[Nmap Engine] Avvio motore Nmap locale..."})
-        client.update_progress(scan_id, 70, "Esecuzione scansione Nmap locale...", logs)
-        nmap_hosts, nmap_findings = run_nmap_probe(targets_str, config)
-        findings.extend(nmap_findings)
-        # Merge nmap hosts
-        for nh in nmap_hosts:
-            matched = False
-            for h in hosts:
-                if h["ip"] == nh["ip"]:
-                    h["ports"].extend([p for p in nh["ports"] if p["port"] not in [x["port"] for x in h["ports"]]])
-                    matched = True
-                    break
-            if not matched:
-                hosts.append(nh)
-        logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Nmap Engine] Completato. {len(nmap_findings)} finding aggiuntivi."})
+        stop = client.update_progress(scan_id, 65, "Scansione nativa completata, verifica moduli esterni...", logs)
+        if stop:
+            print(f"[JOB #{scan_id}] Interrotto dal server.")
+            return
 
-    # 3. Nuclei Engine
-    if "nuclei" in engines and shutil.which("nuclei"):
-        logs.append({"time": now_time_str(), "level": "INFO", "msg": "[Nuclei Engine] Avvio motore Nuclei locale..."})
-        client.update_progress(scan_id, 85, "Esecuzione scansione Nuclei locale...", logs)
-        nuclei_findings = run_nuclei_probe(targets_str, config)
-        findings.extend(nuclei_findings)
-        logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Nuclei Engine] Completato. {len(nuclei_findings)} finding identificati."})
+        # 2. Nmap Engine
+        if "nmap" in engines and shutil.which("nmap"):
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": "[Nmap Engine] Avvio motore Nmap locale..."})
+            client.update_progress(scan_id, 70, "Esecuzione scansione Nmap locale...", logs)
+            nmap_hosts, nmap_findings = await asyncio.to_thread(run_nmap_probe, targets_str, config)
+            findings.extend(nmap_findings)
+            for nh in nmap_hosts:
+                matched = False
+                for h in hosts:
+                    if h["ip"] == nh["ip"]:
+                        h["ports"].extend([p for p in nh["ports"] if p["port"] not in [x["port"] for x in h["ports"]]])
+                        matched = True
+                        break
+                if not matched:
+                    hosts.append(nh)
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Nmap Engine] Completato. {len(nmap_findings)} finding aggiuntivi."})
 
-    logs.append({"time": now_time_str(), "level": "INFO", "msg": "Caricamento risultati finali completato."})
-    client.upload_results(scan_id, hosts=hosts, logs=logs, findings=findings)
-    print(f"[JOB #{scan_id}] Scansione completata con successo ({len(findings)} finding inviati al server).")
+        # 3. Nuclei Engine
+        if "nuclei" in engines and shutil.which("nuclei"):
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": "[Nuclei Engine] Avvio motore Nuclei locale..."})
+            client.update_progress(scan_id, 85, "Esecuzione scansione Nuclei locale...", logs)
+            nuclei_findings = await asyncio.to_thread(run_nuclei_probe, targets_str, config)
+            findings.extend(nuclei_findings)
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Nuclei Engine] Completato. {len(nuclei_findings)} finding identificati."})
+
+        logs.append({"time": now_time_str(), "level": "INFO", "msg": "Caricamento risultati finali completato."})
+        client.upload_results(scan_id, hosts=hosts, logs=logs, findings=findings)
+        print(f"[JOB #{scan_id}] Scansione completata con successo ({len(findings)} finding inviati al server).")
+    except Exception as exc:
+        logs.append({"time": now_time_str(), "level": "ERROR", "msg": f"Errore durante esecuzione job remoto: {exc}"})
+        try:
+            client.upload_results(scan_id, hosts=hosts, logs=logs, findings=findings)
+        except Exception as upload_exc:
+            print(f"[JOB #{scan_id}] Errore invio risultati parziali: {upload_exc}")
 
 
 # ==========================================
@@ -672,17 +744,24 @@ async def run_probe_loop(server: str, token: str, interval: int = 5, insecure: b
 def main():
     parser = argparse.ArgumentParser(description="UrielScan Standalone Remote Probe Agent")
     parser.add_argument("--server", required=True, help="UrielScan server URL (es. https://uriel.msp.com o http://127.0.0.1:8000)")
-    parser.add_argument("--token", required=True, help="Agent authentication token generato dalla dashboard MSSP")
+    parser.add_argument("--token", default="", help="Agent token (preferisci variabile URIELSCAN_AGENT_TOKEN o --token-file)")
+    parser.add_argument("--token-file", default="", help="Percorso file contenente il token dell'agente")
     parser.add_argument("--interval", type=int, default=5, help="Intervallo polling e heartbeat in secondi (default: 5)")
     parser.add_argument("--insecure", action="store_true", help="Disabilita verifica certificato SSL del server (per certificati self-signed)")
     parser.add_argument("--once", action="store_true", help="Esegue un solo ciclo di heartbeat/job ed esce")
 
     args = parser.parse_args()
+    token = args.token.strip() or os.environ.get("URIELSCAN_AGENT_TOKEN", "").strip()
+    if not token and args.token_file:
+        with open(args.token_file, "r", encoding="utf-8") as tf:
+            token = tf.read().strip()
+    if not token:
+        parser.error("Token richiesto: passa --token, --token-file oppure imposta URIELSCAN_AGENT_TOKEN.")
 
     try:
         asyncio.run(run_probe_loop(
             server=args.server,
-            token=args.token,
+            token=token,
             interval=args.interval,
             insecure=args.insecure,
             run_once=args.once

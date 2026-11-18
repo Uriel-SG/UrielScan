@@ -2,11 +2,21 @@ import os
 import re
 import shlex
 import shutil
+import ipaddress
 import subprocess
 import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable
+
+_SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9.\-:/\[\]]+$")
+_SAFE_NSE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _is_valid_nmap_target(token: str) -> bool:
+    if not token or token.startswith("-") or len(token) > 253:
+        return False
+    return bool(_SAFE_TARGET_RE.match(token))
 
 
 def is_admin() -> bool:
@@ -763,6 +773,9 @@ async def run_nmap_scan(
     has_subnet_or_range = False
 
     for entry in raw_entries:
+        if entry.startswith("-"):
+            log("WARN", f"[Nmap Engine] Target non valido ignorato (inizia con '-'): {entry}")
+            continue
         is_url = bool(re.match(r"^https?://", entry, flags=re.IGNORECASE))
         cleaned = re.sub(r"^https?://", "", entry, flags=re.IGNORECASE)
         if is_url:
@@ -779,11 +792,26 @@ async def run_nmap_scan(
             elif re.match(r"^\d+\.\d+\.\d+\.\d+-\d+$", cleaned):
                 has_subnet_or_range = True
 
-        if ":" in cleaned and not cleaned.startswith("[") and "/" not in cleaned:
-            host_part, port_part = cleaned.rsplit(":", 1)
-            if port_part.isdigit():
-                extra_ports.append(port_part)
-            cleaned = host_part
+        # Handle IPv6 brackets or host:port without breaking raw IPv6 addresses like ::1
+        is_raw_ipv6 = False
+        try:
+            ipaddress.IPv6Address(cleaned)
+            is_raw_ipv6 = True
+        except Exception:
+            pass
+
+        if ":" in cleaned and not is_raw_ipv6 and "/" not in cleaned:
+            if cleaned.startswith("[") and "]" in cleaned:
+                cleaned = cleaned[1:cleaned.index("]")]
+            else:
+                host_part, port_part = cleaned.rsplit(":", 1)
+                if port_part.isdigit():
+                    extra_ports.append(port_part)
+                    cleaned = host_part
+
+        if not _is_valid_nmap_target(cleaned):
+            log("WARN", f"[Nmap Engine] Target rifiutato dai controlli di sicurezza: {entry}")
+            continue
         if cleaned and cleaned not in raw_targets:
             raw_targets.append(cleaned)
 
@@ -796,7 +824,7 @@ async def run_nmap_scan(
     # run fast ARP/ICMP Host Discovery (-sn) first so we don't waste 15 minutes port-scanning 240 dead IPs!
     discovered_hosts_meta: Dict[str, Dict[str, str]] = {}
     if has_subnet_or_range:
-        sn_args = [nmap_bin, "-sn", "-oX", "-"] + raw_targets
+        sn_args = [nmap_bin, "-sn", "-oX", "-", "--"] + raw_targets
         log("INFO", f"[Nmap Subnet Discovery] Ricerca host attivi sulla rete ({', '.join(raw_targets)})...")
         try:
             sn_proc = await asyncio.create_subprocess_exec(
@@ -804,7 +832,7 @@ async def run_nmap_scan(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            sn_out, _ = await sn_proc.communicate()
+            sn_out, _ = await asyncio.wait_for(sn_proc.communicate(), timeout=120.0)
             sn_xml = sn_out.decode("utf-8", errors="replace")
             sn_hosts, _ = parse_nmap_xml(sn_xml, None)
             if sn_hosts:
@@ -867,11 +895,13 @@ async def run_nmap_scan(
             if "-p" not in args:
                 args.extend(["-p", port_str])
 
-    # NSE scripts
+    # NSE scripts (validated strict identifier characters, no paths/UNC)
     if nse_scripts and len(nse_scripts) > 0:
-        if "--script" not in args:
-            args.extend(["--script", ",".join(nse_scripts)])
+        safe_nse = [str(s).strip() for s in nse_scripts if _SAFE_NSE_RE.match(str(s).strip())]
+        if safe_nse and "--script" not in args:
+            args.extend(["--script", ",".join(safe_nse)])
 
+    args.append("--")
     args.extend(raw_targets)
 
     cmd_str = " ".join(args)
@@ -883,7 +913,13 @@ async def run_nmap_scan(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            log("ERROR", "Timeout globale Nmap raggiunto (300s): processo terminato.")
+            return {"hosts": [], "findings": []}
     except Exception as e:
         log("ERROR", f"Errore durante l'esecuzione del processo Nmap: {str(e)}")
         raise

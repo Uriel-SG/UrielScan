@@ -329,17 +329,29 @@ export const api = {
     return await res.json();
   },
 
-  async disable2FA(password: string): Promise<{ success: boolean; message: string }> {
+  async disable2FA(password: string, code: string): Promise<{ success: boolean; message: string }> {
     const res = await fetch(`${API_BASE}/auth/2fa/disable`, {
       method: 'POST',
       headers: getAuthHeaders(true),
-      body: JSON.stringify({ password })
+      body: JSON.stringify({ password, code })
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Password non corretta.' }));
+      const err = await res.json().catch(() => ({ detail: 'Credenziali o codice 2FA non validi.' }));
       throw new Error(err.detail || 'Disattivazione 2FA fallita');
     }
     return await res.json();
+  },
+
+  async logout(): Promise<void> {
+    try {
+      await fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        headers: getAuthHeaders(false)
+      });
+    } catch {
+      // ignore network errors on logout
+    }
+    localStorage.removeItem('uriel_token');
   },
 
   async changePassword(current_password: string, new_password: string): Promise<{ success: boolean; message: string }> {

@@ -1,4 +1,5 @@
 import os
+import html
 import json
 import uuid
 from datetime import datetime, timezone
@@ -9,6 +10,21 @@ from backend.database import get_db_connection, get_scan_by_id, get_findings_for
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE_DIR / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _esc(val: Any) -> str:
+    """Escapes untrusted text for safe HTML interpolation."""
+    return html.escape(str(val if val is not None else ""), quote=True)
+
+
+def _safe_img_data_url(url: Any) -> str:
+    """Allows only safe raster/SVG data URIs (or https URLs) properly escaped for img src."""
+    if not isinstance(url, str):
+        return ""
+    s = url.strip()
+    if s.startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/jpg;base64,", "data:image/webp;base64,", "data:image/gif;base64,", "data:image/svg+xml;base64,")):
+        return _esc(s)
+    return ""
 
 
 def generate_html_report(
@@ -65,46 +81,53 @@ def generate_html_report(
     risk_color = "#ef4444" if risk_score >= 75 else ("#f97316" if risk_score >= 50 else ("#eab308" if risk_score >= 25 else "#10b981"))
 
     # MSP Info
-    mssp_name = settings.get("scanner_company_name", "UrielScan Purple Team MSSP")
-    mssp_logo = settings.get("scanner_company_logo", "")
-    mssp_email = settings.get("scanner_company_email", "security@urielscan.io")
-    mssp_web = settings.get("scanner_company_website", "https://urielscan.io")
-    mssp_addr = settings.get("scanner_company_address", "Cyber Security Operations Center")
+    mssp_name = _esc(settings.get("scanner_company_name", "UrielScan Purple Team MSSP"))
+    mssp_logo = _safe_img_data_url(settings.get("scanner_company_logo", ""))
+    mssp_email = _esc(settings.get("scanner_company_email", "security@urielscan.io"))
+    mssp_web = _esc(settings.get("scanner_company_website", "https://urielscan.io"))
+    mssp_addr = _esc(settings.get("scanner_company_address", "Cyber Security Operations Center"))
     default_footer = "Documento Riservato UrielScan Purple Team Assessment" if is_it else "Confidential Document - UrielScan Purple Team Assessment"
-    footer_text = settings.get("report_footer") or default_footer
+    footer_text = _esc(settings.get("report_footer") or default_footer)
 
     # Client Info
-    client_name = org.get("name") or ("Organizzazione Cliente" if is_it else "Client Organization")
-    client_logo = org.get("logo_data", "")
+    client_name = _esc(org.get("name") or ("Organizzazione Cliente" if is_it else "Client Organization"))
+    client_logo = _safe_img_data_url(org.get("logo_data", ""))
     na_val = "N/D" if is_it else "N/A"
-    client_industry = org.get("industry") or na_val
-    client_contact = org.get("contact_name") or ("Referente della Sicurezza" if is_it else "Security Contact")
-    client_email = org.get("contact_email") or na_val
-    client_scope = org.get("target_scope", scan.get("targets", na_val))
+    client_industry = _esc(org.get("industry") or na_val)
+    client_contact = _esc(org.get("contact_name") or ("Referente della Sicurezza" if is_it else "Security Contact"))
+    client_email = _esc(org.get("contact_email") or na_val)
+    client_scope = _esc(org.get("target_scope", scan.get("targets", na_val)))
 
-    # Build HTML sections
+    if not isinstance(ai_analysis, dict):
+        ai_analysis = {}
+
+    # Build HTML sections (all untrusted fields escaped)
     attack_paths_html = ""
     step_prefix = "Fase" if is_it else "Step"
-    for ap in ai_analysis.get("attack_paths", []):
+    for ap in (ai_analysis.get("attack_paths") or []):
+        if not isinstance(ap, dict):
+            continue
         attack_paths_html += f"""
         <div class="card attack-step">
-            <div class="step-badge">{step_prefix} {ap.get('step', 1)}</div>
+            <div class="step-badge">{step_prefix} {_esc(ap.get('step', 1))}</div>
             <div class="step-content">
-                <h4>{ap.get('title', 'Scenario')}</h4>
-                <p>{ap.get('details', '')}</p>
-                <span class="mitre-tag">MITRE: {ap.get('mitre', 'T1046')}</span>
+                <h4>{_esc(ap.get('title', 'Scenario'))}</h4>
+                <p>{_esc(ap.get('details', ''))}</p>
+                <span class="mitre-tag">MITRE: {_esc(ap.get('mitre', 'T1046'))}</span>
             </div>
         </div>
         """
 
     remediation_plan_html = ""
-    for rp in ai_analysis.get("remediation_plan", []):
-        cmd_box = f"<pre><code>{rp.get('command')}</code></pre>" if rp.get("command") else ""
+    for rp in (ai_analysis.get("remediation_plan") or []):
+        if not isinstance(rp, dict):
+            continue
+        cmd_box = f"<pre><code>{_esc(rp.get('command'))}</code></pre>" if rp.get("command") else ""
         remediation_plan_html += f"""
         <div class="card remediation-item">
-            <span class="prio-tag">{rp.get('priority', 'P1')}</span>
+            <span class="prio-tag">{_esc(rp.get('priority', 'P1'))}</span>
             <div class="prio-content">
-                <p><strong>{rp.get('action')}</strong></p>
+                <p><strong>{_esc(rp.get('action'))}</strong></p>
                 {cmd_box}
             </div>
         </div>
@@ -113,12 +136,17 @@ def generate_html_report(
     hosts_table_html = ""
     no_ports_str = "Nessuna porta rilevata" if is_it else "No open ports detected"
     for h in hosts:
-        ports_str = ", ".join([f"{p['port']}/{p['protocol']} ({p['service']})" for p in h.get("ports", [])]) or no_ports_str
+        if not isinstance(h, dict):
+            continue
+        ports_str = ", ".join([
+            f"{_esc(p.get('port'))}/{_esc(p.get('protocol', 'tcp'))} ({_esc(p.get('service', ''))})"
+            for p in (h.get("ports") or []) if isinstance(p, dict)
+        ]) or no_ports_str
         hosts_table_html += f"""
         <tr>
-            <td><strong>{h.get('ip', na_val)}</strong></td>
-            <td>{h.get('hostname', na_val)}</td>
-            <td>{h.get('os', 'Standard Network OS')}</td>
+            <td><strong>{_esc(h.get('ip', na_val))}</strong></td>
+            <td>{_esc(h.get('hostname', na_val))}</td>
+            <td>{_esc(h.get('os', 'Standard Network OS'))}</td>
             <td><small>{ports_str}</small></td>
         </tr>
         """
@@ -130,28 +158,28 @@ def generate_html_report(
     service_word = "Servizio:" if is_it else "Service:"
     desc_word = "Descrizione Vulnerabilità:" if is_it else "Vulnerability Description:"
     for idx, f in enumerate(findings, 1):
-        sev = f.get("severity", "info").lower()
+        sev = str(f.get("severity", "info")).lower()
         sev_color = "#ef4444" if sev == "critical" else ("#f97316" if sev == "high" else ("#eab308" if sev == "medium" else ("#3b82f6" if sev == "low" else "#64748b")))
-        cve_badge = f"<span class='badge cve-badge'>{f.get('cve_ids')}</span>" if f.get("cve_ids") else ""
-        cwe_badge = f"<span class='badge cwe-badge'>{f.get('cwe_id')}</span>" if f.get("cwe_id") else ""
-        engine_badge = f"<span class='badge engine-badge'>{f.get('source_engine', 'native').upper()}</span>"
+        cve_badge = f"<span class='badge cve-badge'>{_esc(f.get('cve_ids'))}</span>" if f.get("cve_ids") else ""
+        cwe_badge = f"<span class='badge cwe-badge'>{_esc(f.get('cwe_id'))}</span>" if f.get("cwe_id") else ""
+        engine_badge = f"<span class='badge engine-badge'>{_esc(str(f.get('source_engine', 'native')).upper())}</span>"
 
-        evidence_html = f"<div class='section-block'><h5>{evidence_lbl}</h5><pre><code>{f.get('evidence', '')}</code></pre></div>" if f.get("evidence") else ""
-        remediation_html = f"<div class='section-block'><h5>{rem_lbl}</h5><div class='rem-box'>{f.get('remediation', '')}</div></div>" if f.get("remediation") else ""
-        ai_insight_html = f"<div class='section-block ai-box'><h5>{ai_lbl}</h5><p>{f.get('ai_insight', '')}</p></div>" if f.get("ai_insight") else ""
+        evidence_html = f"<div class='section-block'><h5>{evidence_lbl}</h5><pre><code>{_esc(f.get('evidence', ''))}</code></pre></div>" if f.get("evidence") else ""
+        remediation_html = f"<div class='section-block'><h5>{rem_lbl}</h5><div class='rem-box'>{_esc(f.get('remediation', ''))}</div></div>" if f.get("remediation") else ""
+        ai_insight_html = f"<div class='section-block ai-box'><h5>{ai_lbl}</h5><p>{_esc(f.get('ai_insight', ''))}</p></div>" if f.get("ai_insight") else ""
 
         findings_dossier_html += f"""
         <div class="card finding-card page-break-inside-avoid">
             <div class="finding-header" style="border-left: 6px solid {sev_color};">
                 <div class="finding-title-row">
                     <span class="finding-num">#{idx}</span>
-                    <h3 class="finding-title">{f.get('title')}</h3>
-                    <span class="badge sev-badge" style="background-color: {sev_color};">{sev.upper()}</span>
+                    <h3 class="finding-title">{_esc(f.get('title'))}</h3>
+                    <span class="badge sev-badge" style="background-color: {sev_color};">{_esc(sev.upper())}</span>
                 </div>
                 <div class="finding-meta-row">
-                    <span><strong>Asset:</strong> {f.get('host')}:{f.get('port')}</span>
-                    <span><strong>{service_word}</strong> {f.get('service', na_val)}</span>
-                    <span><strong>CVSS:</strong> {f.get('cvss', 0.0)}</span>
+                    <span><strong>Asset:</strong> {_esc(f.get('host'))}:{_esc(f.get('port'))}</span>
+                    <span><strong>{service_word}</strong> {_esc(f.get('service', na_val))}</span>
+                    <span><strong>CVSS:</strong> {_esc(f.get('cvss', 0.0))}</span>
                     {engine_badge}
                     {cve_badge}
                     {cwe_badge}
@@ -160,13 +188,13 @@ def generate_html_report(
             <div class="finding-body">
                 <div class="section-block">
                     <h5>{desc_word}</h5>
-                    <p>{f.get('description', '')}</p>
+                    <p>{_esc(f.get('description', ''))}</p>
                 </div>
                 {evidence_html}
                 {remediation_html}
                 {ai_insight_html}
                 <div class="mitre-footer">
-                    <small><strong>MITRE ATT&CK:</strong> {f.get('mitre_tactic', 'Discovery')} &bull; {f.get('mitre_technique', 'T1046 - Network Service Discovery')}</small>
+                    <small><strong>MITRE ATT&CK:</strong> {_esc(f.get('mitre_tactic', 'Discovery'))} &bull; {_esc(f.get('mitre_technique', 'T1046 - Network Service Discovery'))}</small>
                 </div>
             </div>
         </div>
@@ -582,7 +610,7 @@ def generate_html_report(
             <button class="btn-print" onclick="window.print()">{print_btn_txt}</button>
         </div>
 
-        <div class="classification-header">{classification}</div>
+        <div class="classification-header">{_esc(classification)}</div>
 
         <!-- Dual Branding Header -->
         <div class="dual-branding">
@@ -609,7 +637,7 @@ def generate_html_report(
 
         <!-- Title -->
         <div class="report-header">
-            <h1>{report_title}</h1>
+            <h1>{_esc(report_title)}</h1>
             <div class="report-meta">
                 <span><strong>{date_lbl}</strong> {created_at_human}</span>
                 <span><strong>{scan_lbl}</strong> #{scan_id}</span>
@@ -651,7 +679,7 @@ def generate_html_report(
         <!-- Executive Summary -->
         <h2 class="section-title">{sec1_title}</h2>
         <div class="exec-card">
-            <p>{ai_analysis.get('executive_summary', exec_fallback)}</p>
+            <p>{_esc(ai_analysis.get('executive_summary', exec_fallback))}</p>
         </div>
 
         <!-- Purple Team Attack Paths & Remediation -->
@@ -690,7 +718,7 @@ def generate_html_report(
         <!-- Footer -->
         <div class="report-footer">
             <span>{footer_text}</span>
-            <span>{gen_by} {ai_analysis.get('provider_used', 'Purple Team Heuristic')}</span>
+            <span>{gen_by} {_esc(ai_analysis.get('provider_used', 'Purple Team Heuristic'))}</span>
             <span>{page_txt}</span>
         </div>
     </div>

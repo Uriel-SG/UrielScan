@@ -98,6 +98,7 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
   const [totpVerifyCode, setTotpVerifyCode] = useState<string>('');
   const [isSettingUp2FA, setIsSettingUp2FA] = useState<boolean>(false);
   const [disablePassword, setDisablePassword] = useState<string>('');
+  const [disableTotpCode, setDisableTotpCode] = useState<string>('');
   const [currentPassword, setCurrentPassword] = useState<string>('');
   const [newPassword, setNewPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
@@ -201,21 +202,28 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
     });
   };
 
-  // Logo upload helper (converts to base64 Data URI)
+  // Logo upload helper (converts to base64 Data URI, capped at 512 KB, raster formats only)
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'org' | 'scanner') => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64 = reader.result as string;
-        if (target === 'org') {
-          setOrgLogoBase64(base64);
-        } else {
-          setScannerLogoBase64(base64);
-        }
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) {
+      showToast(L('Only PNG, JPEG, WebP, or GIF logos are allowed.', 'Sono consentiti solo loghi PNG, JPEG, WebP o GIF.'), 'warning');
+      return;
     }
+    if (file.size > 512 * 1024) {
+      showToast(L('Logo exceeds maximum size (512 KB).', 'Il logo supera la dimensione massima (512 KB).'), 'warning');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = reader.result as string;
+      if (target === 'org') {
+        setOrgLogoBase64(base64);
+      } else {
+        setScannerLogoBase64(base64);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   // Save Org
@@ -400,19 +408,20 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
 
   const handleDisable2FA = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!disablePassword) {
-      showToast(L('Enter administrator password to disable 2FA.', 'Inserisci la password amministratore per disattivare il 2FA.'), 'warning');
+    if (!disablePassword || disableTotpCode.trim().length < 6) {
+      showToast(L('Enter administrator password and current 6-digit OTP code.', 'Inserisci password amministratore e codice OTP a 6 cifre.'), 'warning');
       return;
     }
     try {
-      await api.disable2FA(disablePassword);
+      await api.disable2FA(disablePassword, disableTotpCode.trim());
       setTwoFactorEnabled(false);
       setDisablePassword('');
+      setDisableTotpCode('');
       showToast(L('Two-factor authentication disabled.', 'Autenticazione a due fattori disabilitata.'), 'info');
       const updated = await api.getAuthMe();
       if (onUserUpdated) onUserUpdated(updated.user);
     } catch (err: any) {
-      showToast(err.message || L('Incorrect password.', 'Password non corretta.'), 'error');
+      showToast(err.message || L('Invalid password or TOTP code.', 'Password o codice OTP non corretti.'), 'error');
     }
   };
 
@@ -752,6 +761,7 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                 onChange={(e) => setAiProvider(e.target.value)}
                 className="input-industrial w-full px-2.5 py-1.5 text-xs"
               >
+                <option value="offline" className="bg-panel text-theme-primary">{L('Offline Heuristic Engine (Zero External Data)', 'Motore Euristico Offline (Zero Dati Esterni)')}</option>
                 <option value="gemini" className="bg-panel text-theme-primary">{L('Google Gemini (Recommended)', 'Google Gemini (Consigliato)')}</option>
                 <option value="openai" className="bg-panel text-theme-primary">OpenAI</option>
                 <option value="anthropic" className="bg-panel text-theme-primary">Anthropic Claude</option>
@@ -991,17 +1001,26 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
               <form onSubmit={handleDisable2FA} className="space-y-3 pt-2">
                 <p className="text-xs text-theme-secondary">
                   {L(
-                    "Your account is currently protected with 2FA TOTP. To disable it, enter the current administrator password:",
-                    "Il tuo account è attualmente protetto con 2FA TOTP. Per disattivarlo, inserisci la password corrente dell'amministratore:"
+                    "Your account is currently protected with 2FA TOTP. To disable it, enter your administrator password and current 6-digit OTP code:",
+                    "Il tuo account è attualmente protetto con 2FA TOTP. Per disattivarlo, inserisci la password amministratore e il codice OTP corrente:"
                   )}
                 </p>
-                <div className="flex items-center space-x-2 max-w-sm">
+                <div className="flex flex-wrap items-center gap-2 max-w-md">
                   <input
                     type="password"
                     value={disablePassword}
                     onChange={(e) => setDisablePassword(e.target.value)}
                     placeholder={L('Administrator Password', 'Password Amministratore')}
-                    className="input-industrial px-3 py-1.5 text-xs flex-1"
+                    className="input-industrial px-3 py-1.5 text-xs flex-1 min-w-[160px]"
+                    required
+                  />
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={disableTotpCode}
+                    onChange={(e) => setDisableTotpCode(e.target.value.replace(/\D/g, ''))}
+                    placeholder="000000"
+                    className="input-industrial px-3 py-1.5 text-center font-mono text-xs tracking-wider w-24"
                     required
                   />
                   <button

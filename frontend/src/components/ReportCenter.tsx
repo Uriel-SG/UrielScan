@@ -75,12 +75,39 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
   const mediumCount = scanFindings.filter((f) => f.severity === 'Medium').length;
   const lowCount = scanFindings.filter((f) => f.severity === 'Low').length;
 
+  const escHtml = (val: unknown): string =>
+    String(val ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+  const safeDataImg = (url?: string): string => {
+    if (!url) return '';
+    const trimmed = url.trim();
+    if (/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,/i.test(trimmed)) {
+      return escHtml(trimmed);
+    }
+    return '';
+  };
+
   const generateStandaloneHTML = () => {
+    const clientFallback = L('Client', 'Cliente');
+    const msspReportFallback = L('MSSP Report', 'MSSP Report');
+    const safeTitle = escHtml(reportTitle);
+    const safeClassification = escHtml(classification);
+    const safeOrgName = escHtml(clientOrg?.name || clientFallback);
+    const safeOrgIndustry = escHtml(clientOrg?.industry || 'N/A');
+    const safeTargets = escHtml(currentScan?.targets || 'N/A');
+    const safeMsspName = escHtml(scannerProfile.company_name);
+    const safeMsspLogo = safeDataImg(scannerProfile.logo_url);
+    const safeClientLogo = safeDataImg(clientOrg?.logo_url);
+    const safeExecNotes = escHtml(executiveNotes);
+    const safeFooter = escHtml(scannerProfile.report_footer);
     const formattedDate = new Date().toLocaleDateString(locale);
     const msspLogoAlt = L('MSSP Logo', 'Logo MSSP');
     const clientLogoAlt = L('Client Logo', 'Logo Cliente');
-    const clientFallback = L('Client', 'Cliente');
-    const msspReportFallback = L('MSSP Report', 'MSSP Report');
     const targetOrgLabel = L('Target Organization', 'Organizzazione Destinataria');
     const scanTargetsLabel = L('Scan Targets', 'Target di Scansione');
     const execSummaryTitle = L('1. Executive Summary & Risk Posture', '1. Sintesi Esecutiva & Postura di Rischio');
@@ -113,7 +140,7 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
 <html lang="${lang}">
 <head>
   <meta charset="UTF-8">
-  <title>${reportTitle} - ${clientOrg?.name || msspReportFallback}</title>
+  <title>${safeTitle} - ${escHtml(clientOrg?.name || msspReportFallback)}</title>
   <style>
     @page { size: A4; margin: 15mm; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #111315; line-height: 1.5; margin: 0; padding: 24px; background: #fff; }
@@ -139,29 +166,29 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
 <body>
   <div class="header-bar">
     <div style="display: flex; align-items: center; gap: 12px;">
-      ${scannerProfile.logo_url ? `<img src="${scannerProfile.logo_url}" alt="${msspLogoAlt}" style="max-height: 40px; max-width: 120px; object-fit: contain;" />` : ''}
+      ${safeMsspLogo ? `<img src="${safeMsspLogo}" alt="${msspLogoAlt}" style="max-height: 40px; max-width: 120px; object-fit: contain;" />` : ''}
       <div>
         <div style="font-weight: 800; font-size: 18px; letter-spacing: 0.5px;">URIELSCAN ASSESSMENT</div>
-        <div style="font-size: 12px; color: #4b5563;">${scannerProfile.company_name}</div>
+        <div style="font-size: 12px; color: #4b5563;">${safeMsspName}</div>
       </div>
     </div>
     <div style="display: flex; align-items: center; gap: 12px; text-align: right;">
       <div>
-        <span class="badge badge-confidential">${classification}</span>
+        <span class="badge badge-confidential">${safeClassification}</span>
         <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">${L('Date', 'Data')}: ${formattedDate}</div>
       </div>
-      ${clientOrg?.logo_url ? `<img src="${clientOrg.logo_url}" alt="${clientLogoAlt}" style="max-height: 40px; max-width: 120px; object-fit: contain;" />` : ''}
+      ${safeClientLogo ? `<img src="${safeClientLogo}" alt="${clientLogoAlt}" style="max-height: 40px; max-width: 120px; object-fit: contain;" />` : ''}
     </div>
   </div>
 
-  <h1>${reportTitle}</h1>
+  <h1>${safeTitle}</h1>
   <div style="font-size: 13px; color: #4b5563; margin-bottom: 20px;">
-    ${targetOrgLabel}: <strong>${clientOrg?.name || clientFallback}</strong> (${clientOrg?.industry || 'N/A'})<br>
-    ${scanTargetsLabel}: <code>${currentScan?.targets || 'N/A'}</code>
+    ${targetOrgLabel}: <strong>${safeOrgName}</strong> (${safeOrgIndustry})<br>
+    ${scanTargetsLabel}: <code>${safeTargets}</code>
   </div>
 
   <h2>${execSummaryTitle}</h2>
-  <p style="font-size: 13px;">${executiveNotes}</p>
+  <p style="font-size: 13px;">${safeExecNotes}</p>
 
   <div class="grid-kpi">
     <div class="kpi-card"><div class="kpi-num crit">${criticalCount}</div><div style="font-size:11px;">${critLabel}</div></div>
@@ -206,18 +233,18 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
   ${scanFindings.map((f, i) => `
     <div class="finding-card">
       <div style="display: flex; justify-content: space-between;">
-        <strong>#${i + 1} ${f.title}</strong>
-        <span class="badge badge-${f.severity.toLowerCase()}">${f.severity} (CVSS ${f.cvss.toFixed(1)})</span>
+        <strong>#${i + 1} ${escHtml(f.title)}</strong>
+        <span class="badge badge-${escHtml(f.severity.toLowerCase())}">${escHtml(f.severity)} (CVSS ${f.cvss.toFixed(1)})</span>
       </div>
-      <div style="font-size: 11px; color: #4b5563; font-family: monospace; margin: 4px 0;">${hostLabel}: ${f.host} | ${portLabel}: ${f.port || 'N/A'} | ${engineLabel}: ${f.source_engine.toUpperCase()}</div>
-      <p style="font-size: 12px; margin: 6px 0;">${f.description}</p>
-      ${f.remediation ? `<div style="font-size: 12px; background: #ecfdf5; border-left: 3px solid #10b981; padding: 6px; margin-top: 6px;"><strong>${blueTeamFixLabel}</strong> ${f.remediation}</div>` : ''}
-      ${includeEvidence && f.evidence ? `<pre class="evidence-box">${f.evidence}</pre>` : ''}
+      <div style="font-size: 11px; color: #4b5563; font-family: monospace; margin: 4px 0;">${hostLabel}: ${escHtml(f.host)} | ${portLabel}: ${escHtml(f.port || 'N/A')} | ${engineLabel}: ${escHtml(f.source_engine.toUpperCase())}</div>
+      <p style="font-size: 12px; margin: 6px 0;">${escHtml(f.description)}</p>
+      ${f.remediation ? `<div style="font-size: 12px; background: #ecfdf5; border-left: 3px solid #10b981; padding: 6px; margin-top: 6px;"><strong>${blueTeamFixLabel}</strong> ${escHtml(f.remediation)}</div>` : ''}
+      ${includeEvidence && f.evidence ? `<pre class="evidence-box">${escHtml(f.evidence)}</pre>` : ''}
     </div>
   `).join('')}
 
   <div class="footer">
-    ${scannerProfile.report_footer}
+    ${safeFooter}
   </div>
 </body>
 </html>`;
@@ -492,6 +519,7 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
             <div className="flex-1 overflow-y-auto p-6 bg-white text-slate-900">
               <iframe
                 title={L('Report Preview', 'Anteprima Report')}
+                sandbox=""
                 srcDoc={generateStandaloneHTML()}
                 className="w-full h-[600px] border-0"
               />

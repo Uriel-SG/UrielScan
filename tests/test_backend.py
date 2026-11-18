@@ -27,7 +27,51 @@ from backend.auth import generate_totp_code
 # Initialize database and load demo data for backend test suite
 init_db()
 seed_demo_data()
-client = TestClient(app)
+raw_client = TestClient(app)
+
+
+class _AuthedClient:
+    """Test helper that attaches a valid admin Bearer token to authenticated requests."""
+    def __init__(self, inner: TestClient):
+        self._inner = inner
+        self._token: str | None = None
+
+    def _get_headers(self, extra_headers=None):
+        if not self._token:
+            resp = self._inner.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+            assert resp.status_code == 200, resp.text
+            self._token = resp.json()["token"]
+        merged = {"Authorization": f"Bearer {self._token}"}
+        if extra_headers:
+            merged.update(extra_headers)
+        return merged
+
+    def get(self, url, **kwargs):
+        if "headers" in kwargs and "X-Agent-Token" in kwargs["headers"]:
+            return self._inner.get(url, **kwargs)
+        kwargs["headers"] = self._get_headers(kwargs.get("headers"))
+        return self._inner.get(url, **kwargs)
+
+    def post(self, url, **kwargs):
+        if "headers" in kwargs and "X-Agent-Token" in kwargs["headers"]:
+            return self._inner.post(url, **kwargs)
+        kwargs["headers"] = self._get_headers(kwargs.get("headers"))
+        return self._inner.post(url, **kwargs)
+
+    def put(self, url, **kwargs):
+        kwargs["headers"] = self._get_headers(kwargs.get("headers"))
+        return self._inner.put(url, **kwargs)
+
+    def patch(self, url, **kwargs):
+        kwargs["headers"] = self._get_headers(kwargs.get("headers"))
+        return self._inner.patch(url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        kwargs["headers"] = self._get_headers(kwargs.get("headers"))
+        return self._inner.delete(url, **kwargs)
+
+
+client = _AuthedClient(raw_client)
 
 
 def test_system_status():
@@ -300,13 +344,18 @@ def test_schedules_crud_and_run_now():
 
 
 def test_auth_flow_and_2fa_totp():
-    # 1. Invalid credentials
-    bad_login = client.post("/api/auth/login", json={"username": "admin", "password": "wrongpassword"})
+    from backend.auth import clear_login_failures, hash_password
+    from backend.database import update_user_password
+
+    clear_login_failures("testclient:admin")
+
+    # 1. Invalid credentials -> 401
+    bad_login = raw_client.post("/api/auth/login", json={"username": "admin", "password": "wrongpassword"})
     assert bad_login.status_code == 401
     assert "Credenziali non valide" in bad_login.json()["detail"]
 
     # 2. Valid login without 2FA
-    login_resp = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    login_resp = raw_client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
     assert login_resp.status_code == 200
     login_data = login_resp.json()
     assert login_data["requires_2fa"] is False
@@ -315,14 +364,14 @@ def test_auth_flow_and_2fa_totp():
     auth_header = {"Authorization": f"Bearer {token}"}
 
     # 3. GET /api/auth/me
-    me_resp = client.get("/api/auth/me", headers=auth_header)
+    me_resp = raw_client.get("/api/auth/me", headers=auth_header)
     assert me_resp.status_code == 200
     me_data = me_resp.json()
     assert me_data["username"] == "admin"
     assert me_data["totp_enabled"] is False
 
     # 4. Setup 2FA
-    setup_resp = client.post("/api/auth/2fa/setup", headers=auth_header)
+    setup_resp = raw_client.post("/api/auth/2fa/setup", headers=auth_header)
     assert setup_resp.status_code == 200
     setup_data = setup_resp.json()
     assert "secret" in setup_data
@@ -331,30 +380,34 @@ def test_auth_flow_and_2fa_totp():
     secret = setup_data["secret"]
 
     # 5. Try invalid TOTP code
-    bad_enable = client.post("/api/auth/2fa/enable", json={"code": "000000"}, headers=auth_header)
+    bad_enable = raw_client.post("/api/auth/2fa/enable", json={"code": "000000"}, headers=auth_header)
     assert bad_enable.status_code == 400
 
     # 6. Enable with valid TOTP code
     real_code = generate_totp_code(secret)
-    enable_resp = client.post("/api/auth/2fa/enable", json={"code": real_code}, headers=auth_header)
+    enable_resp = raw_client.post("/api/auth/2fa/enable", json={"code": real_code}, headers=auth_header)
     assert enable_resp.status_code == 200
     assert enable_resp.json()["totp_enabled"] is True
 
     # 7. Login now requires 2FA
-    login_2fa_resp = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    login_2fa_resp = raw_client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
     assert login_2fa_resp.status_code == 200
     l2_data = login_2fa_resp.json()
     assert l2_data["requires_2fa"] is True
     assert "temp_token" in l2_data
     temp_token = l2_data["temp_token"]
 
+    # Temp token MUST NOT work as a full session token (C-03)
+    assert raw_client.get("/api/auth/me", headers={"Authorization": f"Bearer {temp_token}"}).status_code == 401
+    assert raw_client.get("/api/settings", headers={"Authorization": f"Bearer {temp_token}"}).status_code == 401
+
     # 8. Verify with invalid code -> 401
-    bad_verify = client.post("/api/auth/verify-2fa", json={"temp_token": temp_token, "code": "999999"})
+    bad_verify = raw_client.post("/api/auth/verify-2fa", json={"temp_token": temp_token, "code": "999999"})
     assert bad_verify.status_code == 401
 
     # 9. Verify with valid TOTP code
     real_code_2 = generate_totp_code(secret)
-    verify_resp = client.post("/api/auth/verify-2fa", json={"temp_token": temp_token, "code": real_code_2})
+    verify_resp = raw_client.post("/api/auth/verify-2fa", json={"temp_token": temp_token, "code": real_code_2})
     assert verify_resp.status_code == 200
     v_data = verify_resp.json()
     assert "token" in v_data
@@ -363,32 +416,46 @@ def test_auth_flow_and_2fa_totp():
     auth_header_2fa = {"Authorization": f"Bearer {session_token_2fa}"}
 
     # 10. GET /api/auth/me confirms 2FA enabled
-    me_resp_2 = client.get("/api/auth/me", headers=auth_header_2fa)
+    me_resp_2 = raw_client.get("/api/auth/me", headers=auth_header_2fa)
     assert me_resp_2.status_code == 200
     assert me_resp_2.json()["totp_enabled"] is True
 
-    # 11. Disable 2FA
-    disable_resp = client.post("/api/auth/2fa/disable", json={}, headers=auth_header_2fa)
+    # 11. Disable 2FA requires password AND TOTP code (C-03)
+    assert raw_client.post("/api/auth/2fa/disable", json={}, headers=auth_header_2fa).status_code == 422
+    assert raw_client.post(
+        "/api/auth/2fa/disable",
+        json={"password": "wrong", "code": generate_totp_code(secret)},
+        headers=auth_header_2fa,
+    ).status_code == 401
+
+    disable_resp = raw_client.post(
+        "/api/auth/2fa/disable",
+        json={"password": "admin", "code": generate_totp_code(secret)},
+        headers=auth_header_2fa,
+    )
     assert disable_resp.status_code == 200
     assert disable_resp.json()["totp_enabled"] is False
 
-    # 12. Password change & revert
-    pwd_resp = client.post("/api/auth/change-password", json={
+    # 12. Password minimum length >= 8 enforced + change works
+    short_pwd = raw_client.post("/api/auth/change-password", json={
+        "current_password": "admin",
+        "new_password": "short"
+    }, headers=auth_header_2fa)
+    assert short_pwd.status_code == 400
+
+    pwd_resp = raw_client.post("/api/auth/change-password", json={
         "current_password": "admin",
         "new_password": "new_admin_password_123"
     }, headers=auth_header_2fa)
     assert pwd_resp.status_code == 200
 
     # Verify new password works
-    new_login = client.post("/api/auth/login", json={"username": "admin", "password": "new_admin_password_123"})
+    new_login = raw_client.post("/api/auth/login", json={"username": "admin", "password": "new_admin_password_123"})
     assert new_login.status_code == 200
 
-    # Revert back to admin
-    revert_resp = client.post("/api/auth/change-password", json={
-        "current_password": "new_admin_password_123",
-        "new_password": "admin"
-    }, headers={"Authorization": f"Bearer {new_login.json()['token']}"})
-    assert revert_resp.status_code == 200
+    # Restore password for remaining tests cleanly via DB helper
+    h, s = hash_password("admin")
+    update_user_password("admin", h, s)
 
 
 def test_delete_single_scan():
@@ -666,5 +733,92 @@ def test_remote_agent_workflow():
     # Verify agent no longer exists
     agents_after = client.get(f"/api/agents?org_id={org_id}").json()
     assert not any(a["id"] == agent_id for a in agents_after)
+
+
+def test_security_audit_regressions():
+    from backend.export_engine import export_scan_results_csv, generate_docx_report
+    from backend.scanners.nmap_engine import _is_valid_nmap_target
+    import zipfile, io
+
+    # C-01: Unauthenticated access strictly rejected on protected routes
+    for path in ("/api/settings", "/api/organizations", "/api/scans", "/api/auth/me", "/api/agents"):
+        assert raw_client.get(path).status_code == 401
+
+    # C-02: Path traversal via encoded ../ blocked (never 200)
+    trav_resp = raw_client.get("/..%2F..%2Fbackend%2Fauth.py")
+    assert trav_resp.status_code == 404
+
+    # C-05: Nmap target flag injection rejected
+    assert _is_valid_nmap_target("--script=evil.nse") is False
+    assert _is_valid_nmap_target("-oN") is False
+    assert _is_valid_nmap_target("::1") is True
+    assert _is_valid_nmap_target("192.168.1.0/24") is True
+
+    # C-07: HTML Report escapes XSS payloads in findings/banners
+    from backend.database import get_db_connection
+    scans = client.get("/api/scans").json()
+    sid = scans[0]["id"]
+    org_id = scans[0]["org_id"]
+    conn = get_db_connection()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO findings (scan_id, org_id, host, port, protocol, service, title, severity, cvss, source_engine, description, evidence, created_at)
+            VALUES (?, ?, '10.0.0.1', 80, 'tcp', 'http', '<script>alert(1)</script>', 'high', 7.5, 'native', 'Desc', '</code></pre><script>evil()</script>', '2026-01-01T00:00:00Z');
+            """,
+            (sid, org_id),
+        )
+    conn.close()
+    rep = client.post("/api/reports/generate", json={"scan_id": sid, "title": "<img src=x onerror=alert(1)>"}).json()
+    view_html = client.get(f"/api/reports/{rep['id']}/view").text
+    assert "<script>alert(1)</script>" not in view_html
+    assert "<script>evil()</script>" not in view_html
+    assert "&lt;script&gt;evil()&lt;/script&gt;" in view_html
+    client.delete(f"/api/reports/{rep['id']}")
+
+    # C-08: Unknown Origin is NOT reflected with Allow-Origin
+    cors_resp = raw_client.get("/api/system/status", headers={"Origin": "https://evil.example"})
+    assert cors_resp.headers.get("access-control-allow-origin") != "https://evil.example"
+
+    # H-07: ai_api_key is never returned in plaintext from GET /api/settings
+    client.put("/api/settings", json={"ai_provider": "openai", "ai_api_key": "sk-secret-test-value-9999"})
+    s = client.get("/api/settings").json()
+    assert s["ai_api_key"] == ""
+    assert s["ai_api_key_configured"] is True
+    assert s["ai_api_key_masked"] == "sk-s...9999"
+
+    # H-08 & M-12: CSV formula injection neutralized & DOCX strips control chars
+    csv_bytes = export_scan_results_csv(
+        [{"id": 1, "org_id": 1, "name": "Test"}],
+        [{"id": 1, "org_id": 1, "scan_id": 1, "host": "1.2.3.4", "title": "=HYPERLINK(\"http://evil\",\"click\")", "evidence": "bad\x00\x01banner"}],
+        {1: {"name": "Org"}},
+    ).decode("utf-8")
+    assert "'=HYPERLINK(" in csv_bytes
+
+    docx_bytes = generate_docx_report(
+        report_title="Audit",
+        classification="CONFIDENTIAL",
+        mssp_profile={"company_name": "Sec"},
+        client_org={"name": "Org"},
+        targets="1.2.3.4",
+        hosts=[],
+        findings=[{"host": "1.2.3.4", "port": 80, "severity": "low", "cvss": 2.0, "title": "Ctrl\x00Test", "source_engine": "native", "evidence": "abc\x02\x0bdef"}],
+    )
+    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "\x00" not in doc_xml
+        assert "\x02" not in doc_xml
+
+    # H-09: SSRF blocking on /api/ai/test
+    ssrf_resp = client.post("/api/ai/test", json={"ai_provider": "ollama", "ai_base_url": "http://169.254.169.254/latest/meta-data/"})
+    assert ssrf_resp.status_code == 400
+
+    # M-16: Logout invalidates session token server-side
+    temp_login = raw_client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    tok = temp_login.json()["token"]
+    assert raw_client.get("/api/auth/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+    assert raw_client.post("/api/auth/logout", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+    assert raw_client.get("/api/auth/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
+
 
 

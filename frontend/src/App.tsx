@@ -287,8 +287,8 @@ const AppContent: React.FC = () => {
     setCurrentView('ai-hub');
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('uriel_token');
+  const handleLogout = async () => {
+    await api.logout();
     setIsAuthenticated(false);
     setCurrentUser(null);
     showToast(L('Session disconnected.', 'Sessione disconnessa.'), 'info');

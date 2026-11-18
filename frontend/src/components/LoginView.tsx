@@ -22,8 +22,8 @@ interface LoginViewProps {
 export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, currentTheme = 'uriel-ops' }) => {
   const { lang, setLang, L } = useI18n();
   const [step, setStep] = useState<'credentials' | 'totp'>('credentials');
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [tempToken, setTempToken] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -31,7 +31,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, currentThe
 
   const handleCredentialsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username.trim() || !password.trim()) {
+    if (!username.trim() || !password) {
       setError(L('Please enter both username and password.', 'Inserisci sia username che password.'));
       return;
     }
@@ -40,7 +40,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, currentThe
     setError(null);
 
     try {
-      const res = await api.login(username.trim(), password.trim());
+      const res = await api.login(username.trim(), password);
       if (res.requires_2fa && res.temp_token) {
         setTempToken(res.temp_token);
         setStep('totp');

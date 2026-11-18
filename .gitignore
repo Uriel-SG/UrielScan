@@ -7,9 +7,10 @@ venv/
 .env
 .env.*
 
-# Local UrielScan database, reports & downloaded binaries
+# Local UrielScan database, session secret, reports & downloaded binaries
 data/*.db*
 data/*.sqlite*
+data/.session_secret
 reports/*.html
 reports/*.pdf
 reports/*.docx

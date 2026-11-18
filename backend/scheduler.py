@@ -57,21 +57,29 @@ def _add_schedule_job(sched: Dict[str, Any]) -> None:
     elif freq == "cron" and sched.get("cron_expr"):
         parts = sched["cron_expr"].strip().split()
         if len(parts) == 5:
+            # Convert POSIX Sunday '0'/'7' to APScheduler 'sun' (APScheduler 0 == Monday)
+            dow = parts[4].strip()
+            if dow in ("0", "7"):
+                dow = "sun"
+            else:
+                dow = ",".join("sun" if p in ("0", "7") else p for p in dow.split(","))
             trigger = CronTrigger(
-                minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=parts[4]
+                minute=parts[0], hour=parts[1], day=parts[2], month=parts[3], day_of_week=dow
             )
 
     if not trigger:
         trigger = CronTrigger(hour=hour, minute=minute)
 
-    # Calculate next run
+    # Calculate next run (isolated per job so one invalid schedule never crashes all others)
     try:
         job = scheduler.add_job(
             _execute_scheduled_scan,
             trigger=trigger,
             id=job_id,
             args=[sched_id],
-            replace_existing=True
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
         next_run = job.next_run_time.isoformat() if job.next_run_time else None
         conn = get_db_connection()
@@ -91,9 +99,18 @@ async def _execute_scheduled_scan(schedule_id: int) -> None:
         conn.close()
         return
 
+    # Prevent overlapping scheduled runs for the same org and targets
+    existing_active = conn.execute(
+        "SELECT id FROM scans WHERE org_id = ? AND targets = ? AND status IN ('running', 'queued') LIMIT 1;",
+        (sched["org_id"], sched["targets"])
+    ).fetchone()
+    if existing_active:
+        conn.close()
+        return
+
     now_iso = datetime.now(timezone.utc).isoformat()
     scan_cfg = json.loads(sched["scan_config_json"] or "{}")
-    profile = scan_cfg.get("profile", "full_purple")
+    profile = scan_cfg.get("profile", "standard")
     engines = scan_cfg.get("engines", ["native_net", "native_web", "nmap", "nuclei"])
 
     # Create new scan record
@@ -132,7 +149,7 @@ async def trigger_schedule_now(schedule_id: int) -> int:
 
     now_iso = datetime.now(timezone.utc).isoformat()
     scan_cfg = json.loads(sched["scan_config_json"] or "{}")
-    profile = scan_cfg.get("profile", "full_purple")
+    profile = scan_cfg.get("profile", "standard")
     engines = scan_cfg.get("engines", ["native_net", "native_web", "nmap", "nuclei"])
 
     scan_name = f"[Manuale Rapido] {sched['name']} - {datetime.now().strftime('%Y-%m-%d %H:%M')}"

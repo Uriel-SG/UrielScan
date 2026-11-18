@@ -11,21 +11,25 @@ from backend.ai_engine import analyze_findings
 
 STOP_FLAGS: Dict[int, bool] = {}
 SCAN_THREADS: Dict[int, threading.Thread] = {}
+SCAN_CONCURRENCY_SEM = threading.Semaphore(3)
 
 
 def start_scan_in_background(scan_id: int) -> None:
     STOP_FLAGS[scan_id] = False
 
     def _worker():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(run_scan_pipeline(scan_id))
-        finally:
+        with SCAN_CONCURRENCY_SEM:
+            if STOP_FLAGS.get(scan_id, False):
+                return
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                loop.close()
-            except Exception:
-                pass
+                loop.run_until_complete(run_scan_pipeline(scan_id))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
     t = threading.Thread(target=_worker, daemon=True)
     SCAN_THREADS[scan_id] = t
@@ -51,6 +55,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
     conn = get_db_connection()
     scan = get_scan_by_id(scan_id)
     if not scan:
+        conn.close()
         return
 
     org = get_organization_by_id(scan["org_id"]) or {}
@@ -111,7 +116,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
 
                 if not custom_nse:
                     if profile == "full_purple":
-                        custom_nse = ["default", "vuln", "safe"]
+                        custom_nse = ["default", "safe"]
                     elif profile == "nse_vuln_sweep":
                         custom_nse = ["vuln"]
                     elif profile == "web_ssl_audit":
@@ -193,7 +198,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
             if any(p.get("port") in web_port_numbers for p in h.get("ports", []))
         ]
         discovered_web_ports = len(web_capable_hosts) > 0
-        should_run_web = ("native" in engines or "native_web" in engines or discovered_web_ports)
+        should_run_web = ("native" in engines or "native_web" in engines or "native_ssl" in engines)
 
         if should_run_web:
             # On multi-host/subnet scans, only run SSL/Web audit on hosts with open web/TLS ports;
@@ -383,6 +388,10 @@ async def run_scan_pipeline(scan_id: int) -> None:
         append_log("INFO", f"Analisi AI completata con successo tramite: {ai_res.get('provider_used')}")
         update_progress(100, "Scansione e analisi completate!")
 
+        if STOP_FLAGS.get(scan_id, False):
+            append_log("WARN", "Scansione interrotta dall'utente prima della finalizzazione.")
+            return
+
         with conn:
             conn.execute("""
                 UPDATE scans SET
@@ -394,7 +403,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
                     summary_json = ?,
                     logs_json = ?,
                     ai_analysis_json = ?
-                WHERE id = ?;
+                WHERE id = ? AND status != 'stopped';
             """, (
                 now_iso,
                 json.dumps(hosts_list),

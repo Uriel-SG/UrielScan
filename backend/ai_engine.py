@@ -1,7 +1,44 @@
 import os
 import json
+import logging
+import ipaddress
+import urllib.parse
 from typing import Dict, Any, List, Optional
 import httpx
+
+logger = logging.getLogger("urielscan.ai")
+
+
+def _validate_ai_base_url(base_url: str, provider: str) -> str:
+    """Validates and normalizes AI endpoint URLs against SSRF/metadata leakage."""
+    url = (base_url or "").strip()
+    if provider == "openai":
+        if not url or "127.0.0.1" in url or "localhost" in url or ":11434" in url:
+            return "https://api.openai.com/v1"
+    elif provider == "ollama" and not url:
+        return "http://127.0.0.1:11434/v1"
+
+    if not url:
+        return "https://api.openai.com/v1"
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("URL AI non valido: consentiti solo http:// o https:// con hostname valido.")
+
+    host = parsed.hostname.lower()
+    if host in ("169.254.169.254", "metadata.google.internal", "metadata"):
+        raise ValueError("Accesso a metadata endpoint cloud bloccato.")
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.is_link_local:
+            raise ValueError("Indirizzi link-local non consentiti per endpoint AI.")
+    except ValueError as ve:
+        if "link-local" in str(ve):
+            raise
+
+    if provider == "openai" and parsed.scheme != "https":
+        raise ValueError("OpenAI richiede HTTPS.")
+    return url.rstrip("/")
 
 
 async def test_ai_connection(settings: Dict[str, str]) -> Dict[str, Any]:
@@ -20,30 +57,32 @@ async def test_ai_connection(settings: Dict[str, str]) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             if provider in ["openai", "ollama"]:
-                url = f"{base_url.rstrip('/')}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
+                safe_base = _validate_ai_base_url(base_url, provider)
+                url = f"{safe_base}/chat/completions"
                 headers = {"Authorization": f"Bearer {api_key}" if api_key else "Bearer ollama"}
                 payload = {
                     "model": model or ("gpt-4o" if provider == "openai" else "llama3"),
-                    "messages": [{"role": "user", "content": "Ping test: rispondi 'OK'."}],
+                    "messages": [{"role": "user", "content": "Ping test: respond 'OK'."}],
                     "max_tokens": 10
                 }
                 resp = await client.post(url, json=payload, headers=headers)
                 if resp.status_code == 200:
-                    return {"success": True, "provider": provider, "message": f"Connessione a {provider} ({model}) riuscita!"}
+                    return {"success": True, "provider": provider, "message": f"Connection to {provider} ({model or 'default'}) succeeded!"}
                 else:
-                    return {"success": False, "provider": provider, "message": f"Errore {provider}: HTTP {resp.status_code} - {resp.text[:200]}"}
+                    return {"success": False, "provider": provider, "message": f"Error {provider}: HTTP {resp.status_code} - {resp.text[:200]}"}
 
             elif provider == "gemini":
-                model_name = model or "gemini-1.5-pro"
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                model_name = model or "gemini-2.5-flash"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model_name, safe='')}:generateContent"
+                headers = {"x-goog-api-key": api_key, "content-type": "application/json"}
                 payload = {
-                    "contents": [{"parts": [{"text": "Ping test: rispondi 'OK'."}]}]
+                    "contents": [{"parts": [{"text": "Ping test: respond 'OK'."}]}]
                 }
-                resp = await client.post(url, json=payload)
+                resp = await client.post(url, json=payload, headers=headers)
                 if resp.status_code == 200:
-                    return {"success": True, "provider": "gemini", "message": f"Connessione a Google Gemini ({model_name}) riuscita!"}
+                    return {"success": True, "provider": "gemini", "message": f"Connection to Google Gemini ({model_name}) succeeded!"}
                 else:
-                    return {"success": False, "provider": "gemini", "message": f"Errore Gemini: HTTP {resp.status_code} - {resp.text[:200]}"}
+                    return {"success": False, "provider": "gemini", "message": f"Gemini Error: HTTP {resp.status_code} - {resp.text[:200]}"}
 
             elif provider == "anthropic":
                 model_name = model or "claude-3-5-sonnet-20241022"
@@ -64,6 +103,8 @@ async def test_ai_connection(settings: Dict[str, str]) -> Dict[str, Any]:
                 else:
                     return {"success": False, "provider": "anthropic", "message": f"Errore Anthropic: HTTP {resp.status_code} - {resp.text[:200]}"}
 
+    except ValueError:
+        raise
     except Exception as e:
         return {"success": False, "provider": provider, "message": f"Eccezione di connessione ad AI: {str(e)}"}
 
@@ -101,8 +142,8 @@ async def analyze_findings(
             )
             if external_result:
                 return external_result
-        except Exception:
-            pass  # Fall back smoothly to smart heuristic engine
+        except Exception as e:
+            logger.warning("External LLM analysis failed (%s), falling back to offline heuristic: %s", provider, e)
 
     # Fallback / Default: Smart Offline Heuristic Engine
     return _generate_smart_offline_analysis(scan, findings, org, mode, lang=lang)
@@ -177,7 +218,8 @@ Finding Details:
     async with httpx.AsyncClient(timeout=40.0) as client:
         raw_text = ""
         if provider in ["openai", "ollama"]:
-            url = f"{base_url.rstrip('/')}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
+            safe_base = _validate_ai_base_url(base_url, provider)
+            url = f"{safe_base}/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}" if api_key else "Bearer ollama"}
             payload = {
                 "model": model or ("gpt-4o" if provider == "openai" else "llama3"),
@@ -193,12 +235,13 @@ Finding Details:
                 raw_text = data["choices"][0]["message"]["content"]
 
         elif provider == "gemini":
-            model_name = model or "gemini-1.5-pro"
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            model_name = model or "gemini-2.5-flash"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model_name, safe='')}:generateContent"
+            headers = {"x-goog-api-key": api_key, "content-type": "application/json"}
             payload = {
                 "contents": [{"parts": [{"text": f"{system_prompt}\n\n{user_content}"}]}]
             }
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
                 raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -234,6 +277,8 @@ Finding Details:
             clean_json = clean_json.strip()
 
             parsed = json.loads(clean_json)
+            if not isinstance(parsed, dict):
+                return None
             parsed["provider_used"] = f"{provider.upper()} ({model or 'default'})"
             return parsed
 

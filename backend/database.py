@@ -102,6 +102,7 @@ def init_db() -> None:
         totp_secret TEXT DEFAULT '',
         totp_enabled INTEGER NOT NULL DEFAULT 0,
         totp_pending_secret TEXT DEFAULT '',
+        must_change_password INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
     );
 
@@ -220,6 +221,13 @@ def init_db() -> None:
         cursor.execute("ALTER TABLE scans ADD COLUMN agent_id INTEGER;")
         conn.commit()
 
+    # Safe migration for must_change_password on users table
+    cursor.execute("PRAGMA table_info(users);")
+    user_cols = [col[1] for col in cursor.fetchall()]
+    if "must_change_password" not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;")
+        conn.commit()
+
     # Mark DB initialized on first launch with default MSSP settings only
     # (demo organizations/scans are NOT auto-seeded; loadable manually from Settings)
     cursor.execute("SELECT value FROM settings WHERE key = 'db_initialized';")
@@ -248,12 +256,15 @@ def init_db() -> None:
     user_count = cursor.fetchone()["count"]
     if user_count == 0:
         from backend.auth import hash_password
-        p_hash, p_salt = hash_password("admin")
+        env_admin_pw = os.getenv("URIELSCAN_ADMIN_PASSWORD", "").strip()
+        initial_pw = env_admin_pw if env_admin_pw else "admin"
+        must_change = 0 if env_admin_pw else 1
+        p_hash, p_salt = hash_password(initial_pw)
         now_iso = datetime.now(timezone.utc).isoformat()
         cursor.execute("""
-            INSERT INTO users (username, password_hash, salt, role, totp_secret, totp_enabled, totp_pending_secret, created_at)
-            VALUES (?, ?, ?, 'admin', '', 0, '', ?);
-        """, ("admin", p_hash, p_salt, now_iso))
+            INSERT INTO users (username, password_hash, salt, role, totp_secret, totp_enabled, totp_pending_secret, must_change_password, created_at)
+            VALUES (?, ?, ?, 'admin', '', 0, '', ?, ?);
+        """, ("admin", p_hash, p_salt, must_change, now_iso))
         conn.commit()
 
     conn.close()
@@ -864,7 +875,7 @@ def update_user_password(username: str, password_hash: str, salt: str) -> bool:
     conn = get_db_connection()
     with conn:
         cur = conn.execute(
-            "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?;",
+            "UPDATE users SET password_hash = ?, salt = ?, must_change_password = 0 WHERE username = ?;",
             (password_hash, salt, username)
         )
         updated = cur.rowcount > 0

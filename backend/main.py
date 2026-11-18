@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Body, Response, Header
+from fastapi import FastAPI, HTTPException, Query, Body, Response, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -27,6 +27,8 @@ from backend.auth import (
     generate_totp_secret, get_otpauth_uri, generate_totp_code,
     verify_totp_code, generate_qr_svg_data_uri,
     create_session_token, verify_session_token,
+    check_login_rate_limit, record_login_failure, clear_login_failures,
+    revoke_session_token,
     verify_totp, generate_qr_svg, create_token, decode_token
 )
 from backend.scanners.nmap_engine import detect_nmap, get_nse_catalog
@@ -64,10 +66,54 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS
+_PUBLIC_API_PATHS = {
+    "/api/system/status",
+    "/api/auth/login",
+    "/api/auth/verify-2fa",
+    "/api/auth/logout",
+}
+
+
+@app.middleware("http")
+async def enforce_api_auth_and_security_headers(request: Request, call_next):
+    path = request.url.path
+
+    # Enforce authentication on all /api/* endpoints except explicit public/agent routes
+    if request.method != "OPTIONS" and path.startswith("/api/"):
+        if path not in _PUBLIC_API_PATHS and not path.startswith("/api/agent/"):
+            auth_hdr = request.headers.get("authorization", "")
+            if not auth_hdr.startswith("Bearer "):
+                return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+            token = auth_hdr[7:].strip()
+            decoded = verify_session_token(token, allow_temp=False)
+            if not decoded:
+                return JSONResponse(status_code=401, content={"detail": "Invalid or expired session token."})
+            username = decoded.get("sub") or decoded.get("username")
+            if not username or not get_user_by_username(username):
+                return JSONResponse(status_code=401, content={"detail": "User account not found."})
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if path.startswith("/api/reports/") and path.endswith("/view"):
+        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
+    return response
+
+
+# Enable restricted CORS (registered after http middleware so CORS wraps outer layer cleanly)
+_CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "URIELSCAN_CORS_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000,http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -83,16 +129,15 @@ class LoginRequest(BaseModel):
     password: str
 
 class Verify2FARequest(BaseModel):
-    temp_token: Optional[str] = None
-    username: Optional[str] = None
+    temp_token: str
     code: str
 
 class Enable2FARequest(BaseModel):
     code: str
 
 class Disable2FARequest(BaseModel):
-    password: Optional[str] = None
-    code: Optional[str] = None
+    password: str
+    code: str
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
@@ -321,26 +366,38 @@ async def seed_demo_endpoint():
 # ==========================================
 
 def _get_current_user_from_header(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    username = "admin"
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ")[1]
-        decoded = verify_session_token(token)
-        if decoded and (decoded.get("sub") or decoded.get("username")):
-            username = decoded.get("sub") or decoded.get("username")
-
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Autenticazione richiesta.")
+    token = authorization[7:].strip()
+    decoded = verify_session_token(token, allow_temp=False)
+    if not decoded:
+        raise HTTPException(status_code=401, detail="Token di sessione non valido o scaduto.")
+    username = decoded.get("sub") or decoded.get("username")
+    if not username:
+        raise HTTPException(status_code=401, detail="Token di sessione privo di utente.")
     user = get_user_by_username(username)
     if not user:
-        user = get_user_by_username("admin")
-    if not user:
-        raise HTTPException(status_code=401, detail="Utente non autenticato o inesistente")
+        raise HTTPException(status_code=401, detail="Utente non autenticato o inesistente.")
     return user
 
 
 @app.post("/api/auth/login")
-async def auth_login(req: LoginRequest):
+async def auth_login(req: LoginRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"{client_ip}:{req.username}"
+    allowed, retry_after = check_login_rate_limit(rate_key)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Troppi tentativi falliti. Riprova tra {retry_after} secondi."
+        )
+
     user = get_user_by_username(req.username)
     if not user or not verify_password(req.password, user["salt"], user["password_hash"]):
+        record_login_failure(rate_key)
         raise HTTPException(status_code=401, detail="Credenziali non valide.")
+
+    clear_login_failures(rate_key)
 
     if user["totp_enabled"]:
         temp_token = create_session_token(user["username"], user["role"], expires_in_seconds=600, is_temp=True)
@@ -359,22 +416,21 @@ async def auth_login(req: LoginRequest):
             "id": user["id"],
             "username": user["username"],
             "role": user["role"],
-            "totp_enabled": False
+            "totp_enabled": False,
+            "must_change_password": bool(user.get("must_change_password", 0)),
         }
     }
 
 
 @app.post("/api/auth/verify-2fa")
 async def auth_verify_2fa(req: Verify2FARequest):
-    username = req.username
-    if not username and req.temp_token:
-        decoded = verify_session_token(req.temp_token)
-        if not decoded:
-            raise HTTPException(status_code=401, detail="Token 2FA temporaneo non valido o scaduto.")
-        username = decoded.get("sub") or decoded.get("username")
+    decoded = verify_session_token(req.temp_token, allow_temp=True)
+    if not decoded or not decoded.get("temp"):
+        raise HTTPException(status_code=401, detail="Token 2FA temporaneo non valido o scaduto.")
 
+    username = decoded.get("sub") or decoded.get("username")
     if not username:
-        username = "admin"
+        raise HTTPException(status_code=401, detail="Token 2FA non valido.")
 
     user = get_user_by_username(username)
     if not user:
@@ -384,6 +440,7 @@ async def auth_verify_2fa(req: Verify2FARequest):
     if not secret or not verify_totp_code(secret, req.code):
         raise HTTPException(status_code=401, detail="Codice TOTP non valido. Verifica l'ora del dispositivo.")
 
+    revoke_session_token(req.temp_token)
     token = create_session_token(user["username"], user["role"], expires_in_seconds=86400, is_temp=False)
     return {
         "token": token,
@@ -391,9 +448,17 @@ async def auth_verify_2fa(req: Verify2FARequest):
             "id": user["id"],
             "username": user["username"],
             "role": user["role"],
-            "totp_enabled": True
+            "totp_enabled": True,
+            "must_change_password": bool(user.get("must_change_password", 0)),
         }
     }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(authorization: Optional[str] = Header(None)):
+    if authorization and authorization.startswith("Bearer "):
+        revoke_session_token(authorization[7:].strip())
+    return {"success": True}
 
 
 @app.get("/api/auth/me")
@@ -403,11 +468,13 @@ async def auth_me(authorization: Optional[str] = Header(None)):
         "username": user["username"],
         "role": user.get("role", "admin"),
         "totp_enabled": bool(user["totp_enabled"]),
+        "must_change_password": bool(user.get("must_change_password", 0)),
         "user": {
             "id": user["id"],
             "username": user["username"],
             "role": user.get("role", "admin"),
-            "totp_enabled": bool(user["totp_enabled"])
+            "totp_enabled": bool(user["totp_enabled"]),
+            "must_change_password": bool(user.get("must_change_password", 0)),
         }
     }
 
@@ -446,11 +513,13 @@ async def auth_2fa_enable(req: Enable2FARequest, authorization: Optional[str] = 
 
 
 @app.post("/api/auth/2fa/disable")
-async def auth_2fa_disable(req: Optional[Disable2FARequest] = None, authorization: Optional[str] = Header(None)):
+async def auth_2fa_disable(req: Disable2FARequest, authorization: Optional[str] = Header(None)):
     user = _get_current_user_from_header(authorization)
-    if req and req.password:
-        if not verify_password(req.password, user["salt"], user["password_hash"]):
-            raise HTTPException(status_code=401, detail="Password errata.")
+    if not verify_password(req.password, user["salt"], user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Password errata.")
+    secret = user.get("totp_secret", "")
+    if user.get("totp_enabled") and (not secret or not verify_totp_code(secret, req.code)):
+        raise HTTPException(status_code=401, detail="Codice TOTP non valido.")
 
     disable_user_totp(user["username"])
 
@@ -466,8 +535,8 @@ async def auth_change_password(req: ChangePasswordRequest, authorization: Option
     user = _get_current_user_from_header(authorization)
     if not verify_password(req.current_password, user["salt"], user["password_hash"]):
         raise HTTPException(status_code=401, detail="Password attuale errata.")
-    if len(req.new_password.strip()) < 4:
-        raise HTTPException(status_code=400, detail="La nuova password deve contenere almeno 4 caratteri.")
+    if len(req.new_password.strip()) < 8:
+        raise HTTPException(status_code=400, detail="La nuova password deve contenere almeno 8 caratteri.")
 
     new_hash, new_salt = hash_password(req.new_password.strip())
     update_user_password(user["username"], new_hash, new_salt)
@@ -479,16 +548,29 @@ async def auth_change_password(req: ChangePasswordRequest, authorization: Option
 # 2. SETTINGS & AI CONFIGURATION ENDPOINTS
 # ==========================================
 
+def _mask_settings(s: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(s)
+    raw_key = str(out.get("ai_api_key") or "")
+    out["ai_api_key"] = ""
+    out["ai_api_key_configured"] = bool(raw_key)
+    if len(raw_key) >= 8:
+        out["ai_api_key_masked"] = f"{raw_key[:4]}...{raw_key[-4:]}"
+    elif raw_key:
+        out["ai_api_key_masked"] = "****"
+    else:
+        out["ai_api_key_masked"] = ""
+    return {
+        **out,
+        "company_name": out.get("scanner_company_name", ""),
+        "contact_email": out.get("scanner_company_email", ""),
+        "website": out.get("scanner_company_website", ""),
+        "logo_url": out.get("scanner_company_logo", ""),
+    }
+
+
 @app.get("/api/settings")
 async def get_settings_endpoint():
-    s = get_settings()
-    return {
-        **s,
-        "company_name": s.get("scanner_company_name", ""),
-        "contact_email": s.get("scanner_company_email", ""),
-        "website": s.get("scanner_company_website", ""),
-        "logo_url": s.get("scanner_company_logo", ""),
-    }
+    return _mask_settings(get_settings())
 
 
 @app.put("/api/settings")
@@ -510,16 +592,18 @@ async def update_settings_endpoint(payload: SettingsModel):
         raw["ai_model"] = raw.pop("model")
     if "base_url" in raw and "ai_base_url" not in raw:
         raw["ai_base_url"] = raw.pop("base_url")
+
+    # Preserve stored AI key when UI submits blank or masked placeholder
+    incoming_key = str(raw.get("ai_api_key", ""))
+    if "ai_api_key" in raw and (incoming_key == "" or "..." in incoming_key or incoming_key == "****"):
+        raw.pop("ai_api_key", None)
+
     update_settings(raw)
-    s = get_settings()
+    masked = _mask_settings(get_settings())
     return {
         "success": True,
-        "settings": s,
-        **s,
-        "company_name": s.get("scanner_company_name", ""),
-        "contact_email": s.get("scanner_company_email", ""),
-        "website": s.get("scanner_company_website", ""),
-        "logo_url": s.get("scanner_company_logo", ""),
+        "settings": masked,
+        **masked,
     }
 
 
@@ -530,15 +614,20 @@ async def test_ai_endpoint(settings_override: Optional[SettingsModel] = None):
         raw = {k: v for k, v in settings_override.model_dump().items() if v is not None}
         if "provider" in raw:
             current["ai_provider"] = raw["provider"]
-        if "api_key" in raw:
+        if "api_key" in raw and raw["api_key"] and "..." not in str(raw["api_key"]):
             current["ai_api_key"] = raw["api_key"]
         if "model" in raw:
             current["ai_model"] = raw["model"]
         if "base_url" in raw:
             current["ai_base_url"] = raw["base_url"]
         for k, v in raw.items():
+            if k in ("ai_api_key", "api_key") and (not v or "..." in str(v)):
+                continue
             current[k] = v
-    res = await test_ai_connection(current)
+    try:
+        res = await test_ai_connection(current)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     return res
 
 
@@ -763,8 +852,9 @@ async def export_scan_results(
     mssp_profile = {
         "company_name": settings.get("scanner_company_name", "UrielScan Security"),
         "analyst_name": settings.get("scanner_analyst_name", "Purple Team"),
-        "contact_email": settings.get("scanner_contact_email", ""),
+        "contact_email": settings.get("scanner_company_email", ""),
         "logo_url": settings.get("scanner_company_logo", ""),
+        "report_footer": settings.get("report_footer", ""),
     }
 
     is_it = (lang or "en").lower().startswith("it")
@@ -1031,8 +1121,9 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
     mssp_profile = {
         "company_name": settings.get("scanner_company_name", "UrielScan Security"),
         "analyst_name": settings.get("scanner_analyst_name", "Purple Team"),
-        "contact_email": settings.get("scanner_contact_email", ""),
+        "contact_email": settings.get("scanner_company_email", ""),
         "logo_url": settings.get("scanner_company_logo", ""),
+        "report_footer": settings.get("report_footer", ""),
     }
 
     findings = get_findings_for_scan(sid)
@@ -1575,11 +1666,15 @@ if FRONTEND_DIST.is_dir():
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="API endpoint non trovato.")
 
-        potential_file = FRONTEND_DIST / full_path
-        if full_path and potential_file.is_file():
-            return FileResponse(potential_file)
+        dist_root = FRONTEND_DIST.resolve()
+        if full_path:
+            potential_file = (dist_root / full_path).resolve()
+            if not potential_file.is_relative_to(dist_root):
+                raise HTTPException(status_code=404, detail="Percorso non valido.")
+            if potential_file.is_file():
+                return FileResponse(potential_file)
 
-        index_file = FRONTEND_DIST / "index.html"
+        index_file = dist_root / "index.html"
         if index_file.is_file():
             return FileResponse(index_file)
 
