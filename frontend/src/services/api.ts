@@ -482,6 +482,7 @@ export const api = {
               provider: raw.system?.ai_provider || 'Google Gemini',
               model: raw.system?.ai_model || 'gemini-2.5-flash',
             },
+            bootstrap: raw.bootstrap,
           };
         }
         return raw;
@@ -498,6 +499,17 @@ export const api = {
     };
   },
 
+  async installNmap(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-nmap`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Installazione Nmap fallita');
+    }
+    return await res.json();
+  },
+
   async installNuclei(): Promise<{ success: boolean; message: string; version?: string }> {
     const res = await fetch(`${API_BASE}/system/install-nuclei`, {
       method: 'POST',
@@ -505,6 +517,28 @@ export const api = {
     });
     if (!res.ok) {
       throw new Error('Installazione Nuclei fallita');
+    }
+    return await res.json();
+  },
+
+  async installZap(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-zap`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Installazione OWASP ZAP fallita');
+    }
+    return await res.json();
+  },
+
+  async installAllEngines(): Promise<{ started: boolean; bootstrap?: EngineStatus['bootstrap'] }> {
+    const res = await fetch(`${API_BASE}/system/install-all-engines`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Avvio installazione motori fallito');
     }
     return await res.json();
   },

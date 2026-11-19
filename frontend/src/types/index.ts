@@ -158,6 +158,11 @@ export interface EngineStatus {
     provider: string;
     model: string;
   };
+  bootstrap?: {
+    running: boolean;
+    completed: boolean;
+    engines: Record<string, { status: string; message: string }>;
+  };
 }
 
 export interface NSEScript {

@@ -6,11 +6,16 @@ import time
 import uuid
 import shutil
 import asyncio
+import platform
+import subprocess
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import httpx
+
+from backend.scanners.archive_utils import safe_extract_tar, safe_extract_zip, stream_download
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BIN_DIR = BASE_DIR / "bin"
@@ -54,12 +59,77 @@ def _zap_api_request(base_url: str, path: str, params: Optional[Dict[str, str]] 
         return None
 
 
+def _check_java_major(java_bin: str) -> int:
+    try:
+        proc = subprocess.run([java_bin, "-version"], capture_output=True, text=True, timeout=5)
+        out = (proc.stderr or "") + "\n" + (proc.stdout or "")
+        m = re.search(r'(?:version\s+"|openjdk\s+)(\d+)(?:\.(\d+))?', out, re.IGNORECASE)
+        if m:
+            maj = int(m.group(1))
+            return int(m.group(2) or 0) if maj == 1 else maj
+    except Exception:
+        pass
+    return 0
+
+
+def _find_java_bin(min_major: int = 17) -> Optional[str]:
+    java_exe = "java.exe" if platform.system() == "Windows" else "java"
+    candidates: List[str] = []
+
+    for cand in sorted(BIN_DIR.glob(f"jre/**/bin/{java_exe}"), reverse=True):
+        if cand.is_file():
+            candidates.append(str(cand))
+
+    java_home = os.environ.get("JAVA_HOME", "").strip()
+    if java_home:
+        jh_bin = Path(java_home) / "bin" / java_exe
+        if jh_bin.is_file():
+            candidates.append(str(jh_bin))
+
+    sys_java = shutil.which("java")
+    if sys_java:
+        candidates.append(sys_java)
+
+    if platform.system() == "Windows":
+        for p in (
+            r"C:\Program Files\ZAP\Zed Attack Proxy\jre\bin\java.exe",
+            r"C:\Program Files\OWASP\Zed Attack Proxy\jre\bin\java.exe",
+        ):
+            if Path(p).is_file():
+                candidates.append(p)
+        adopt_dir = Path(r"C:\Program Files\Eclipse Adoptium")
+        if adopt_dir.is_dir():
+            for cand in sorted(adopt_dir.glob("*/bin/java.exe"), reverse=True):
+                candidates.append(str(cand))
+
+    seen = set()
+    for c in candidates:
+        if c in seen or not Path(c).is_file():
+            continue
+        seen.add(c)
+        if _check_java_major(c) >= min_major:
+            return c
+    return None
+
+
+def _extract_zap_version_label(zap_bin_path: Path) -> str:
+    parent = zap_bin_path.parent
+    for jar in sorted(parent.glob("zap-*.jar"), reverse=True):
+        m = re.search(r"zap-([0-9]+\.[0-9]+\.[0-9]+)", jar.name)
+        if m:
+            return f"OWASP ZAP {m.group(1)} (CLI)"
+    m = re.search(r"ZAP[_-]([0-9]+\.[0-9]+\.[0-9]+)", parent.name, re.IGNORECASE)
+    if m:
+        return f"OWASP ZAP {m.group(1)} (CLI)"
+    return "OWASP ZAP CLI"
+
+
 def detect_zap() -> Dict[str, Any]:
     """Detects either a running OWASP ZAP daemon API or a local OWASP ZAP CLI installation."""
     zap_url = os.getenv("URIELSCAN_ZAP_URL", "http://127.0.0.1:8080").strip()
     api_key = os.getenv("URIELSCAN_ZAP_API_KEY", "").strip()
 
-    # 1. Fast probe against running ZAP API daemon (0.4s so UI status never stalls)
+    # 1. Fast probe against running ZAP API daemon (0.45s so UI status never stalls)
     if zap_url:
         ver_data = _zap_api_request(zap_url, "/JSON/core/view/version/", api_key=api_key, timeout=0.45)
         if ver_data and "version" in ver_data:
@@ -70,34 +140,39 @@ def detect_zap() -> Dict[str, Any]:
                 "path": zap_url,
             }
 
-    # 2. Check local PATH binaries
+    # 2. Check portable ZAP in bin/zap (requires usable Java 17+ or adjacent JRE)
+    target_script = "zap.bat" if platform.system() == "Windows" else "zap.sh"
+    for sub_bin in sorted(BIN_DIR.glob(f"zap/**/{target_script}"), reverse=True):
+        if sub_bin.is_file():
+            has_local_jre = (sub_bin.parent / "jre").is_dir()
+            if has_local_jre or _find_java_bin(17):
+                return {
+                    "installed": True,
+                    "mode": "cli",
+                    "version": _extract_zap_version_label(sub_bin),
+                    "path": str(sub_bin),
+                }
+
+    # 3. Check local PATH binaries
     for cmd_name in ("zap.bat", "zap.sh", "zaproxy", "zap"):
         found = shutil.which(cmd_name)
         if found:
             return {
                 "installed": True,
                 "mode": "cli",
-                "version": "OWASP ZAP CLI",
+                "version": _extract_zap_version_label(Path(found)),
                 "path": found,
             }
 
-    # 3. Check standard install directories and BIN_DIR
+    # 4. Check standard install directories
     for p_str in KNOWN_ZAP_PATHS:
-        if Path(p_str).is_file():
+        p_obj = Path(p_str)
+        if p_obj.is_file():
             return {
                 "installed": True,
                 "mode": "cli",
-                "version": "OWASP ZAP CLI",
+                "version": _extract_zap_version_label(p_obj),
                 "path": p_str,
-            }
-
-    for sub_bin in BIN_DIR.glob("**/zap.*"):
-        if sub_bin.name.lower() in ("zap.bat", "zap.sh") and sub_bin.is_file():
-            return {
-                "installed": True,
-                "mode": "cli",
-                "version": "OWASP ZAP CLI",
-                "path": str(sub_bin),
             }
 
     return {"installed": False, "mode": "none", "version": "", "path": ""}
@@ -353,13 +428,29 @@ async def _run_zap_cli_scan(
     log: Callable[[str, str], None],
 ) -> List[Dict[str, Any]]:
     all_findings: List[Dict[str, Any]] = []
+    zap_dir = Path(zap_bin).resolve().parent
+    zap_jars = sorted(zap_dir.glob("zap-*.jar"), reverse=True)
+    java_bin = _find_java_bin(17)
+
+    env = os.environ.copy()
+    if java_bin:
+        java_home = str(Path(java_bin).resolve().parent.parent)
+        env["JAVA_HOME"] = java_home
+        env["PATH"] = str(Path(java_bin).resolve().parent) + os.pathsep + env.get("PATH", "")
+
     for u in urls[:4]:
         out_xml = BIN_DIR / f"zap_{os.getpid()}_{uuid.uuid4().hex[:8]}.xml"
-        cmd = [zap_bin, "-cmd", "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
+        if zap_jars and java_bin:
+            cmd = [java_bin, "-Xmx512m", "-jar", str(zap_jars[0]), "-cmd", "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
+        else:
+            cmd = [zap_bin, "-cmd", "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
+
         log("INFO", f"[OWASP ZAP CLI] Scansione headless su {u}...")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                cwd=str(zap_dir) if zap_dir.is_dir() else None,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -383,6 +474,143 @@ async def _run_zap_cli_scan(
                 except Exception:
                     pass
     return all_findings
+
+
+async def _ensure_portable_jre() -> Optional[str]:
+    existing = _find_java_bin(17)
+    if existing:
+        return existing
+
+    os_map = {"windows": "windows", "linux": "linux", "darwin": "mac"}
+    arch_map = {"x86_64": "x64", "amd64": "x64", "arm64": "aarch64", "aarch64": "aarch64"}
+    target_os = os_map.get(platform.system().lower(), "linux")
+    target_arch = arch_map.get(platform.machine().lower(), "x64")
+
+    api_url = (
+        f"https://api.adoptium.net/v3/assets/latest/17/hotspot"
+        f"?architecture={target_arch}&image_type=jre&os={target_os}&vendor=eclipse"
+    )
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        resp = await client.get(api_url, headers={"User-Agent": "UrielScan-Installer/1.0"})
+        if resp.status_code != 200:
+            return None
+        assets = resp.json()
+        if not assets or not isinstance(assets, list):
+            return None
+        pkg = (assets[0].get("binary") or {}).get("package") or {}
+        dl_url = pkg.get("link")
+        pkg_name = pkg.get("name") or f"temurin17_jre.{'zip' if target_os == 'windows' else 'tar.gz'}"
+        if not dl_url:
+            return None
+
+    arch_path = BIN_DIR / pkg_name
+    jre_dir = BIN_DIR / "jre"
+    await stream_download(dl_url, arch_path, timeout=300.0)
+    try:
+        if pkg_name.lower().endswith(".zip"):
+            safe_extract_zip(arch_path, jre_dir)
+        else:
+            safe_extract_tar(arch_path, jre_dir)
+    finally:
+        if arch_path.exists():
+            arch_path.unlink(missing_ok=True)
+
+    if platform.system() != "Windows":
+        for jbin in jre_dir.glob("**/bin/*"):
+            if jbin.is_file():
+                try:
+                    os.chmod(str(jbin), 0o755)
+                except Exception:
+                    pass
+
+    return _find_java_bin(17)
+
+
+async def install_zap() -> Dict[str, Any]:
+    """Automatically downloads Eclipse Temurin JRE 17 and OWASP ZAP Crossplatform into bin/zap."""
+    det = detect_zap()
+    if det["installed"]:
+        return {
+            "success": True,
+            "version": det["version"],
+            "path": det["path"],
+            "message": f"OWASP ZAP already installed: {det['path']} ({det['version']})",
+        }
+
+    try:
+        java_bin = await _ensure_portable_jre()
+        if not java_bin:
+            return {
+                "success": False,
+                "version": "",
+                "path": "",
+                "message": "Failed to provision Java 17+ JRE required by OWASP ZAP.",
+            }
+
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://api.github.com/repos/zaproxy/zaproxy/releases/latest",
+                headers={"User-Agent": "UrielScan-Installer/1.0"},
+            )
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "version": "",
+                    "path": "",
+                    "message": f"GitHub API error fetching OWASP ZAP release: HTTP {resp.status_code}",
+                }
+            release = resp.json()
+            tag = release.get("tag_name", "latest")
+            assets = release.get("assets", []) or []
+            dl_url = None
+            for asset in assets:
+                name = str(asset.get("name", "")).lower()
+                if "crossplatform" in name and name.endswith(".zip"):
+                    dl_url = asset.get("browser_download_url")
+                    break
+            if not dl_url:
+                return {
+                    "success": False,
+                    "version": "",
+                    "path": "",
+                    "message": "OWASP ZAP Crossplatform ZIP asset not found in latest release.",
+                }
+
+        zap_zip = BIN_DIR / "zap_download.zip"
+        zap_dir = BIN_DIR / "zap"
+        await stream_download(dl_url, zap_zip, timeout=360.0)
+        try:
+            safe_extract_zip(zap_zip, zap_dir)
+        finally:
+            if zap_zip.exists():
+                zap_zip.unlink(missing_ok=True)
+
+        if platform.system() != "Windows":
+            for sh_file in zap_dir.glob("**/zap.sh"):
+                if sh_file.is_file():
+                    os.chmod(str(sh_file), 0o755)
+
+        det = detect_zap()
+        if det["installed"]:
+            return {
+                "success": True,
+                "version": det["version"],
+                "path": det["path"],
+                "message": f"OWASP ZAP {tag} installed in {det['path']} (with JRE 17).",
+            }
+        return {
+            "success": False,
+            "version": "",
+            "path": "",
+            "message": "OWASP ZAP extraction completed but CLI binary was not detected.",
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "version": "",
+            "path": "",
+            "message": f"OWASP ZAP installation failed: {exc}",
+        }
 
 
 async def run_zap_scan(

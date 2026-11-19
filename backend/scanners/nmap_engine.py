@@ -2,12 +2,20 @@ import os
 import re
 import shlex
 import shutil
+import platform
 import ipaddress
 import subprocess
 import asyncio
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
+import httpx
+
+from backend.scanners.archive_utils import safe_extract_zip, stream_download
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+BIN_DIR = BASE_DIR / "bin"
+BIN_DIR.mkdir(parents=True, exist_ok=True)
 
 _SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9.\-:/\[\]]+$")
 _SAFE_NSE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -585,7 +593,20 @@ ZENMAP_PRESETS = [
 
 
 def detect_nmap() -> Dict[str, Any]:
-    nmap_path = shutil.which("nmap")
+    target_exe = "nmap.exe" if platform.system() == "Windows" else "nmap"
+    nmap_path: Optional[str] = None
+
+    # 1. Check portable workspace installation in bin/nmap first or fallback after PATH
+    sys_nmap = shutil.which("nmap")
+    if sys_nmap and Path(sys_nmap).is_file():
+        nmap_path = sys_nmap
+
+    if not nmap_path:
+        for cand in sorted(BIN_DIR.glob(f"nmap/**/{target_exe}"), reverse=True):
+            if cand.is_file():
+                nmap_path = str(cand)
+                break
+
     if not nmap_path:
         for p in KNOWN_NMAP_PATHS:
             if os.path.isfile(p):
@@ -1209,3 +1230,117 @@ def _create_finding_from_script(
         "mitre_technique": curated_meta["mitre_technique"] if curated_meta else "T1046 - Network Service Discovery",
         "ai_insight": f"Verificato tramite Nmap NSE {script_id}."
     }
+
+
+async def _run_install_cmd(cmd: List[str], timeout: float = 180.0) -> Tuple[int, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out = ((stdout or b"") + b"\n" + (stderr or b"")).decode("utf-8", errors="replace").strip()
+        return proc.returncode or 0, out
+    except Exception as exc:
+        return 1, str(exc)
+
+
+async def install_nmap() -> Dict[str, Any]:
+    """Automatically installs Nmap (native package manager or portable ZIP in bin/nmap) if missing."""
+    det = detect_nmap()
+    if det["installed"]:
+        return {
+            "success": True,
+            "version": det["version"],
+            "path": det["path"],
+            "nse_count": det["nse_count"],
+            "message": f"Nmap already installed: {det['path']} (v{det['version']})",
+        }
+
+    system = platform.system()
+    try:
+        if system == "Windows":
+            # 1. Try winget silently if available
+            if shutil.which("winget"):
+                rc, _ = await _run_install_cmd([
+                    "winget", "install", "--id", "Insecure.Nmap", "--exact",
+                    "--silent", "--accept-package-agreements", "--accept-source-agreements",
+                ], timeout=180.0)
+                det = detect_nmap()
+                if rc == 0 and det["installed"]:
+                    return {
+                        "success": True,
+                        "version": det["version"],
+                        "path": det["path"],
+                        "nse_count": det["nse_count"],
+                        "message": f"Nmap v{det['version']} installed via winget.",
+                    }
+
+            # 2. Portable official Nmap Win32 ZIP fallback in bin/nmap (no admin required)
+            dist_url = "https://nmap.org/dist/"
+            zip_filename = "nmap-7.92-win32.zip"
+            try:
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                    resp = await client.get(dist_url, headers={"User-Agent": "UrielScan-Installer/1.0"})
+                    if resp.status_code == 200:
+                        matches = sorted(set(re.findall(r"nmap-[0-9.]+-win32\.zip", resp.text)))
+                        if matches:
+                            zip_filename = matches[-1]
+            except Exception:
+                pass
+
+            zip_path = BIN_DIR / "nmap_download.zip"
+            nmap_dest = BIN_DIR / "nmap"
+            await stream_download(f"{dist_url}{zip_filename}", zip_path, timeout=240.0)
+            try:
+                safe_extract_zip(zip_path, nmap_dest)
+            finally:
+                if zip_path.exists():
+                    zip_path.unlink(missing_ok=True)
+
+        elif system == "Linux":
+            prefix = [] if getattr(os, "geteuid", lambda: 1)() == 0 else (["sudo", "-n"] if shutil.which("sudo") else [])
+            if shutil.which("apt-get"):
+                await _run_install_cmd(prefix + ["apt-get", "update", "-qq"])
+                await _run_install_cmd(prefix + ["apt-get", "install", "-y", "nmap"])
+            elif shutil.which("dnf"):
+                await _run_install_cmd(prefix + ["dnf", "install", "-y", "nmap"])
+            elif shutil.which("yum"):
+                await _run_install_cmd(prefix + ["yum", "install", "-y", "nmap"])
+            elif shutil.which("pacman"):
+                await _run_install_cmd(prefix + ["pacman", "-Sy", "--noconfirm", "nmap"])
+            elif shutil.which("apk"):
+                await _run_install_cmd(prefix + ["apk", "add", "--no-cache", "nmap", "nmap-scripts"])
+            elif shutil.which("zypper"):
+                await _run_install_cmd(prefix + ["zypper", "--non-interactive", "install", "nmap"])
+
+        elif system == "Darwin" and shutil.which("brew"):
+            await _run_install_cmd(["brew", "install", "nmap"], timeout=240.0)
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "version": "",
+            "path": "",
+            "nse_count": 0,
+            "message": f"Nmap auto-install failed: {exc}",
+        }
+
+    det = detect_nmap()
+    if det["installed"]:
+        return {
+            "success": True,
+            "version": det["version"],
+            "path": det["path"],
+            "nse_count": det["nse_count"],
+            "message": f"Nmap v{det['version']} installed in {det['path']} ({det['nse_count']} NSE scripts).",
+        }
+    return {
+        "success": False,
+        "version": "",
+        "path": "",
+        "nse_count": 0,
+        "message": f"Automatic Nmap installation on {system} could not complete automatically.",
+    }
+

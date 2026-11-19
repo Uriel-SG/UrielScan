@@ -38,9 +38,10 @@ from backend.auth import (
     revoke_session_token,
     verify_totp, generate_qr_svg, create_token, decode_token
 )
-from backend.scanners.nmap_engine import detect_nmap, get_nse_catalog
+from backend.scanners.nmap_engine import detect_nmap, get_nse_catalog, install_nmap
 from backend.scanners.nuclei_engine import detect_nuclei, install_nuclei
-from backend.scanners.zap_engine import detect_zap
+from backend.scanners.zap_engine import detect_zap, install_zap
+from backend.scanners.engine_bootstrap import get_bootstrap_state, start_engine_bootstrap_background
 from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.orchestrator import start_scan_in_background, stop_scan
 from backend.scanners.nat_guard import check_targets_nat_loopback
@@ -65,6 +66,7 @@ async def lifespan(app: FastAPI):
     # Startup
     init_db()
     init_scheduler()
+    start_engine_bootstrap_background()
     yield
     # Shutdown
     shutdown_scheduler()
@@ -348,14 +350,30 @@ async def get_system_status():
             "nmap": nmap_info,
             "nuclei": nuclei_info,
             "zap": zap_info
-        }
+        },
+        "bootstrap": get_bootstrap_state(),
     }
+
+
+@app.post("/api/system/install-nmap")
+async def install_nmap_endpoint():
+    return await install_nmap()
 
 
 @app.post("/api/system/install-nuclei")
 async def install_nuclei_endpoint():
-    result = await install_nuclei()
-    return result
+    return await install_nuclei()
+
+
+@app.post("/api/system/install-zap")
+async def install_zap_endpoint():
+    return await install_zap()
+
+
+@app.post("/api/system/install-all-engines")
+async def install_all_engines_endpoint():
+    started = start_engine_bootstrap_background(force=False, allow_in_test=True)
+    return {"started": started, "bootstrap": get_bootstrap_state()}
 
 
 @app.post("/api/system/reset-data")

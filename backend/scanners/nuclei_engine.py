@@ -2,13 +2,14 @@ import os
 import sys
 import json
 import shutil
-import zipfile
 import platform
 import subprocess
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable
 import httpx
+
+from backend.scanners.archive_utils import safe_extract_zip, stream_download
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BIN_DIR = BASE_DIR / "bin"
@@ -129,26 +130,14 @@ async def install_nuclei() -> Dict[str, Any]:
                     "message": f"Nessun asset compatibile trovato per {target_os}_{target_arch}."
                 }
 
-            # Download zip
-            zip_resp = await client.get(asset_download_url)
-            if zip_resp.status_code != 200:
-                return {
-                    "success": False,
-                    "version": "",
-                    "path": "",
-                    "message": f"Errore nel download del file ZIP: HTTP {zip_resp.status_code}"
-                }
-
+            # Download & safely extract zip
             zip_temp = BIN_DIR / "nuclei_download.zip"
-            with open(zip_temp, "wb") as f:
-                f.write(zip_resp.content)
-
-            # Extract
-            with zipfile.ZipFile(zip_temp, "r") as z:
-                z.extractall(BIN_DIR)
-
-            if zip_temp.exists():
-                zip_temp.unlink()
+            await stream_download(asset_download_url, zip_temp, timeout=180.0)
+            try:
+                safe_extract_zip(zip_temp, BIN_DIR)
+            finally:
+                if zip_temp.exists():
+                    zip_temp.unlink(missing_ok=True)
 
             binary_name = "nuclei.exe" if platform.system() == "Windows" else "nuclei"
             bin_final = BIN_DIR / binary_name

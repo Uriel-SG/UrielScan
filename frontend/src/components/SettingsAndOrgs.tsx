@@ -95,9 +95,9 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
   const [isTestingAI, setIsTestingAI] = useState<boolean>(false);
   const [aiTestResult, setAiTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Nuclei auto-installer state
-  const [isInstallingNuclei, setIsInstallingNuclei] = useState<boolean>(false);
-  const [nucleiInstallResult, setNucleiInstallResult] = useState<string | null>(null);
+  // Engine auto-installer state (Nmap, Nuclei, OWASP ZAP + JRE)
+  const [installingEngine, setInstallingEngine] = useState<'nmap' | 'nuclei' | 'zap' | 'all' | null>(null);
+  const [engineInstallResult, setEngineInstallResult] = useState<string | null>(null);
 
   // Security & 2FA State
   const [twoFactorEnabled, setTwoFactorEnabled] = useState<boolean>(Boolean(currentUser?.two_factor_enabled));
@@ -392,20 +392,37 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
     }
   };
 
-  // Auto-install Nuclei
-  const handleInstallNuclei = async () => {
-    setIsInstallingNuclei(true);
-    setNucleiInstallResult(null);
+  // Auto-install individual or all missing engines (Nmap, Nuclei, OWASP ZAP)
+  const handleInstallEngine = async (engine: 'nmap' | 'nuclei' | 'zap' | 'all') => {
+    setInstallingEngine(engine);
+    setEngineInstallResult(null);
     try {
-      const res = await api.installNuclei();
-      setNucleiInstallResult(res.message);
-      showToast(res.message, 'success');
+      if (engine === 'all') {
+        await api.installAllEngines();
+        const msg = L(
+          'Background installation started for all missing engines (Nmap, Nuclei, OWASP ZAP + JRE). Status updates automatically.',
+          'Installazione in background avviata per tutti i motori mancanti (Nmap, Nuclei, OWASP ZAP + JRE). Lo stato si aggiorna automaticamente.'
+        );
+        setEngineInstallResult(msg);
+        showToast(msg, 'info');
+        onRefreshData();
+        return;
+      }
+      const res =
+        engine === 'nmap'
+          ? await api.installNmap()
+          : engine === 'zap'
+          ? await api.installZap()
+          : await api.installNuclei();
+      setEngineInstallResult(res.message);
+      showToast(res.message, res.success ? 'success' : 'warning');
       onRefreshData();
     } catch (err: any) {
-      setNucleiInstallResult(L('Installation failed.', 'Installazione fallita.'));
-      showToast(err.message || L('Error installing Nuclei.', 'Errore installazione Nuclei.'), 'error');
+      const msg = err?.message || L(`Error installing ${engine}.`, `Errore installazione ${engine}.`);
+      setEngineInstallResult(msg);
+      showToast(msg, 'error');
     } finally {
-      setIsInstallingNuclei(false);
+      setInstallingEngine(null);
     }
   };
 
@@ -876,40 +893,111 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
       {activeSection === 'engines' && (
         <div className="space-y-4 max-w-2xl">
           <div className="card-industrial p-4 space-y-3">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
-              {L('Scanning Engines Status', 'Stato Motori di Scansione')}
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                {L('Scanning Engines Status', 'Stato Motori di Scansione')}
+              </h2>
+              {(!engineStatus.nmap.available || !engineStatus.nuclei.available || !engineStatus.zap?.available) && (
+                <button
+                  type="button"
+                  onClick={() => handleInstallEngine('all')}
+                  disabled={installingEngine !== null || Boolean(engineStatus.bootstrap?.running)}
+                  className="btn-primary px-3 py-1 text-xs font-semibold flex items-center space-x-1.5 disabled:opacity-50"
+                >
+                  {(installingEngine === 'all' || engineStatus.bootstrap?.running) && (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  )}
+                  <span>
+                    {engineStatus.bootstrap?.running
+                      ? L('Auto-Installing Missing...', 'Installazione Automatica...')
+                      : L('Auto-Install Missing Engines', 'Installa Motori Mancanti')}
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {engineStatus.bootstrap?.running && (
+              <div className="p-2.5 rounded border border-theme-accent/50 bg-subtle text-xs text-theme-primary flex items-center space-x-2">
+                <Loader2 className="w-4 h-4 animate-spin text-theme-accent shrink-0" />
+                <span>
+                  {L(
+                    'First-launch auto-setup is downloading and configuring missing engines in the background (Nmap / Nuclei / OWASP ZAP + Java 17 JRE)...',
+                    'Configurazione automatica iniziale in corso in background per i motori mancanti (Nmap / Nuclei / OWASP ZAP + Java 17 JRE)...'
+                  )}
+                </span>
+              </div>
+            )}
+
             <div className="space-y-2">
-              <div className="p-3 rounded border border-theme bg-subtle flex items-center justify-between">
+              <div className="p-3 rounded border border-theme bg-subtle flex items-center justify-between gap-2">
                 <div>
                   <div className="text-xs font-bold text-theme-primary">Nmap Engine</div>
                   <div className="text-[11px] text-theme-secondary">
-                    {L('Version:', 'Versione:')} {engineStatus.nmap.version || L('Detected', 'Rilevato')} • {engineStatus.nmap.scripts_count} {L('NSE scripts', 'script NSE')}
+                    {engineStatus.nmap.available
+                      ? `${L('Version:', 'Versione:')} ${engineStatus.nmap.version || L('Detected', 'Rilevato')} • ${engineStatus.nmap.scripts_count} ${L('NSE scripts', 'script NSE')}`
+                      : (engineStatus.bootstrap?.engines?.nmap?.message || L('Not installed — auto-installs portable Nmap & NSE scripts', 'Non installato — scarica automaticamente Nmap + script NSE'))}
                   </div>
                 </div>
-                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${engineStatus.nmap.available ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400' : 'bg-red-950/30 border-red-600 text-red-400'}`}>
-                  {engineStatus.nmap.available ? L('AVAILABLE', 'DISPONIBILE') : L('NOT FOUND', 'NON TROVATO')}
-                </span>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                    engineStatus.nmap.available
+                      ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400'
+                      : engineStatus.bootstrap?.engines?.nmap?.status === 'installing'
+                      ? 'bg-sky-950/30 border-sky-600 text-sky-400'
+                      : 'bg-red-950/30 border-red-600 text-red-400'
+                  }`}>
+                    {engineStatus.nmap.available
+                      ? L('AVAILABLE', 'DISPONIBILE')
+                      : engineStatus.bootstrap?.engines?.nmap?.status === 'installing'
+                      ? L('INSTALLING...', 'INSTALLAZIONE...')
+                      : L('NOT FOUND', 'NON TROVATO')}
+                  </span>
+                  {!engineStatus.nmap.available && (
+                    <button
+                      type="button"
+                      onClick={() => handleInstallEngine('nmap')}
+                      disabled={installingEngine !== null}
+                      className="btn-primary px-2.5 py-1 text-xs flex items-center space-x-1 disabled:opacity-50"
+                    >
+                      {installingEngine === 'nmap' && <Loader2 className="w-3 h-3 animate-spin" />}
+                      <span>{installingEngine === 'nmap' ? L('Installing...', 'Installazione...') : L('Install Nmap', 'Installa Nmap')}</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="p-3 rounded border border-theme bg-subtle flex items-center justify-between">
+              <div className="p-3 rounded border border-theme bg-subtle flex items-center justify-between gap-2">
                 <div>
                   <div className="text-xs font-bold text-theme-primary">Nuclei Template Engine</div>
                   <div className="text-[11px] text-theme-secondary">
-                    {L('Version:', 'Versione:')} {engineStatus.nuclei.version || L('Not installed', 'Non installato')}
+                    {engineStatus.nuclei.available
+                      ? `${L('Version:', 'Versione:')} ${engineStatus.nuclei.version || L('Active', 'Attivo')}`
+                      : (engineStatus.bootstrap?.engines?.nuclei?.message || L('Not installed — auto-installs latest binary', 'Non installato — scarica automaticamente'))}
                   </div>
                 </div>
-                <div className="flex items-center space-x-2">
-                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${engineStatus.nuclei.available ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400' : 'bg-amber-950/30 border-amber-600 text-amber-400'}`}>
-                    {engineStatus.nuclei.available ? L('ACTIVE', 'ATTIVO') : L('NOT CONFIGURED', 'NON CONFIGURATO')}
+                <div className="flex items-center space-x-2 shrink-0">
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                    engineStatus.nuclei.available
+                      ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400'
+                      : engineStatus.bootstrap?.engines?.nuclei?.status === 'installing'
+                      ? 'bg-sky-950/30 border-sky-600 text-sky-400'
+                      : 'bg-amber-950/30 border-amber-600 text-amber-400'
+                  }`}>
+                    {engineStatus.nuclei.available
+                      ? L('ACTIVE', 'ATTIVO')
+                      : engineStatus.bootstrap?.engines?.nuclei?.status === 'installing'
+                      ? L('INSTALLING...', 'INSTALLAZIONE...')
+                      : L('NOT CONFIGURED', 'NON CONFIGURATO')}
                   </span>
                   {!engineStatus.nuclei.available && (
                     <button
-                      onClick={handleInstallNuclei}
-                      disabled={isInstallingNuclei}
-                      className="btn-primary px-2.5 py-1 text-xs"
+                      type="button"
+                      onClick={() => handleInstallEngine('nuclei')}
+                      disabled={installingEngine !== null}
+                      className="btn-primary px-2.5 py-1 text-xs flex items-center space-x-1 disabled:opacity-50"
                     >
-                      {isInstallingNuclei ? L('Installing...', 'Installazione...') : L('Download Nuclei', 'Scarica Nuclei')}
+                      {installingEngine === 'nuclei' && <Loader2 className="w-3 h-3 animate-spin" />}
+                      <span>{installingEngine === 'nuclei' ? L('Installing...', 'Installazione...') : L('Install Nuclei', 'Installa Nuclei')}</span>
                     </button>
                   )}
                 </div>
@@ -921,17 +1009,40 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                   <div className="text-[11px] text-theme-secondary">
                     {engineStatus.zap?.available
                       ? `${engineStatus.zap.version || 'OWASP ZAP'} • ${L('Cross-engine deduplication enabled', 'Deduplicazione integrata con Nuclei/Nmap attiva')}`
-                      : L('Not detected (start ZAP daemon on :8080 / URIELSCAN_ZAP_URL or install ZAP CLI)', 'Non rilevato (avvia daemon ZAP su :8080 / URIELSCAN_ZAP_URL oppure installa ZAP CLI)')}
+                      : (engineStatus.bootstrap?.engines?.zap?.message || L('Not detected — auto-installs OWASP ZAP + portable JRE 17 in bin/', 'Non rilevato — scarica automaticamente OWASP ZAP + JRE 17 in bin/'))}
                   </div>
                 </div>
-                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border shrink-0 ${engineStatus.zap?.available ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400' : 'bg-amber-950/30 border-amber-600 text-amber-400'}`}>
-                  {engineStatus.zap?.available ? L('ACTIVE', 'ATTIVO') : L('NOT CONFIGURED', 'NON CONFIGURATO')}
-                </span>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                    engineStatus.zap?.available
+                      ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400'
+                      : engineStatus.bootstrap?.engines?.zap?.status === 'installing'
+                      ? 'bg-sky-950/30 border-sky-600 text-sky-400'
+                      : 'bg-amber-950/30 border-amber-600 text-amber-400'
+                  }`}>
+                    {engineStatus.zap?.available
+                      ? L('ACTIVE', 'ATTIVO')
+                      : engineStatus.bootstrap?.engines?.zap?.status === 'installing'
+                      ? L('INSTALLING...', 'INSTALLAZIONE...')
+                      : L('NOT CONFIGURED', 'NON CONFIGURATO')}
+                  </span>
+                  {!engineStatus.zap?.available && (
+                    <button
+                      type="button"
+                      onClick={() => handleInstallEngine('zap')}
+                      disabled={installingEngine !== null}
+                      className="btn-primary px-2.5 py-1 text-xs flex items-center space-x-1 disabled:opacity-50"
+                    >
+                      {installingEngine === 'zap' && <Loader2 className="w-3 h-3 animate-spin" />}
+                      <span>{installingEngine === 'zap' ? L('Installing...', 'Installazione...') : L('Install OWASP ZAP', 'Installa OWASP ZAP')}</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-            {nucleiInstallResult && (
+            {engineInstallResult && (
               <div className="p-2 rounded bg-subtle text-xs font-mono text-theme-secondary border border-theme">
-                {nucleiInstallResult}
+                {engineInstallResult}
               </div>
             )}
           </div>

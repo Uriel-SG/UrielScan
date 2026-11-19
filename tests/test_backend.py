@@ -1204,6 +1204,76 @@ def test_probe_self_contained_installers():
     assert raw_client.get(lin_link["local_download_path"]).status_code == 404
 
 
+def test_engine_auto_bootstrap_and_install_endpoints(tmp_path, monkeypatch):
+    import io, zipfile, platform
+    from backend import main as main_mod
+    from backend.scanners import nmap_engine, zap_engine, archive_utils
+
+    # 1. /api/system/status exposes bootstrap structure
+    status_data = raw_client.get("/api/system/status").json()
+    assert "bootstrap" in status_data
+    assert "engines" in status_data["bootstrap"]
+    for eng in ("nmap", "nuclei", "zap"):
+        assert eng in status_data["bootstrap"]["engines"]
+
+    # 2. Portable detection for Nmap & OWASP ZAP inside temporary BIN_DIR
+    fake_bin = tmp_path / "bin"
+    exe_name = "nmap.exe" if platform.system() == "Windows" else "nmap"
+    portable_nmap_dir = fake_bin / "nmap" / "nmap-7.95"
+    (portable_nmap_dir / "scripts").mkdir(parents=True)
+    (portable_nmap_dir / exe_name).write_text("", encoding="utf-8")
+    (portable_nmap_dir / "scripts" / "http-title.nse").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(nmap_engine, "BIN_DIR", fake_bin)
+    monkeypatch.setattr(nmap_engine, "KNOWN_NMAP_PATHS", [])
+    monkeypatch.setattr(nmap_engine.shutil, "which", lambda *a, **kw: None)
+    nmap_det = nmap_engine.detect_nmap()
+    assert nmap_det["installed"] is True
+    assert nmap_det["nse_count"] == 1
+    assert "nmap-7.95" in nmap_det["path"]
+
+    zap_script = "zap.bat" if platform.system() == "Windows" else "zap.sh"
+    portable_zap_dir = fake_bin / "zap" / "ZAP_2.17.0"
+    (portable_zap_dir / "jre").mkdir(parents=True)
+    (portable_zap_dir / zap_script).write_text("", encoding="utf-8")
+    (portable_zap_dir / "zap-2.17.0.jar").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(zap_engine, "BIN_DIR", fake_bin)
+    monkeypatch.setattr(zap_engine, "KNOWN_ZAP_PATHS", [])
+    monkeypatch.setattr(zap_engine, "_zap_api_request", lambda *a, **kw: None)
+    monkeypatch.setattr(zap_engine.shutil, "which", lambda *a, **kw: None)
+    zap_det = zap_engine.detect_zap()
+    assert zap_det["installed"] is True
+    assert zap_det["mode"] == "cli"
+    assert "2.17.0" in zap_det["version"]
+
+    # 3. Install endpoints invoke backend installers cleanly
+    async def fake_install_nmap():
+        return {"success": True, "version": "7.95", "path": "bin/nmap", "nse_count": 600, "message": "ok nmap"}
+
+    async def fake_install_zap():
+        return {"success": True, "version": "2.17.0", "path": "bin/zap", "message": "ok zap"}
+
+    monkeypatch.setattr(main_mod, "install_nmap", fake_install_nmap)
+    monkeypatch.setattr(main_mod, "install_zap", fake_install_zap)
+    monkeypatch.setattr(main_mod, "start_engine_bootstrap_background", lambda **kw: True)
+
+    assert client.post("/api/system/install-nmap").json()["success"] is True
+    assert client.post("/api/system/install-zap").json()["success"] is True
+    assert client.post("/api/system/install-all-engines").json()["started"] is True
+
+    # 4. Zip-Slip protection in archive_utils
+    evil_zip = tmp_path / "evil.zip"
+    with zipfile.ZipFile(evil_zip, "w") as zf:
+        zf.writestr("../../outside.txt", "pwned")
+    try:
+        archive_utils.safe_extract_zip(evil_zip, tmp_path / "extract")
+        assert False, "Expected ValueError on Zip-Slip path"
+    except ValueError as exc:
+        assert "Unsafe ZIP path" in str(exc)
+
+
+
 
 
 

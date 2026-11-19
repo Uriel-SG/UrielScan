@@ -150,6 +150,28 @@ const AppContent: React.FC = () => {
     }
   }, [isAuthenticated, loadInitialData]);
 
+  // Live polling while background engine bootstrap (Nmap/Nuclei/ZAP) installs missing tools
+  useEffect(() => {
+    if (!isAuthenticated || !engineStatus.bootstrap?.running) return;
+    const timer = setInterval(async () => {
+      try {
+        const updated = await api.getEngineStatus();
+        setEngineStatus((prev) => {
+          if (!prev.nmap.available && updated.nmap.available) {
+            api.getNSEScripts().then(setNseScripts).catch(() => {});
+          }
+          return updated;
+        });
+        if (!updated.bootstrap?.running) {
+          api.getNSEScripts().then(setNseScripts).catch(() => {});
+        }
+      } catch {
+        // ignore transient poll error
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [isAuthenticated, engineStatus.bootstrap?.running]);
+
   // REAL Polling for running scans (NO artificial local increments!)
   useEffect(() => {
     if (!isAuthenticated) return;
