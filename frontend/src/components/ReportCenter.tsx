@@ -1,20 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  FileText, 
-  Printer, 
-  Download, 
-  Eye, 
-  Building2, 
-  Layers, 
-  Check, 
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  FileText,
+  Printer,
+  Download,
+  Eye,
+  Building2,
+  Layers,
+  Check,
   X,
   ShieldCheck,
   Loader2,
-  FileEdit
+  FileEdit,
+  ChevronDown,
+  Clock,
+  Trash2,
+  List,
+  ArrowLeft,
+  Search
 } from 'lucide-react';
-import { Scan, Finding, Organization, ScannerProfile } from '../types';
+import { Scan, Finding, Organization, ScannerProfile, SavedReport } from '../types';
 import { api } from '../services/api';
-import { useToast } from './UIFeedback';
+import { useToast, ConfirmModal } from './UIFeedback';
 import { useI18n } from '../i18n/LanguageContext';
 
 interface ReportCenterProps {
@@ -24,6 +30,14 @@ interface ReportCenterProps {
   scannerProfile: ScannerProfile;
   selectedScanId: string | null;
 }
+
+const SEVERITY_ORDER: Record<string, number> = {
+  Critical: 0,
+  High: 1,
+  Medium: 2,
+  Low: 3,
+  Info: 4,
+};
 
 const DEFAULT_TITLES = {
   en: 'Purple Team Security Assessment & Remediation Report',
@@ -64,16 +78,86 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
   }, [lang, hasCustomTitle, hasCustomNotes]);
 
   const [isPreviewOpen, setIsPreviewOpen] = useState<boolean>(false);
-  const [exportingFormat, setExportingFormat] = useState<'docx' | 'pdf' | null>(null);
+  const [exportingFormat, setExportingFormat] = useState<'docx' | 'pdf' | 'html' | null>(null);
+  const [urielLogoDataUri, setUrielLogoDataUri] = useState<string>('');
+  const [savedReports, setSavedReports] = useState<SavedReport[]>([]);
+  const [isReportDropdownOpen, setIsReportDropdownOpen] = useState<boolean>(false);
+  const [showAllReports, setShowAllReports] = useState<boolean>(false);
+  const [reportSearch, setReportSearch] = useState<string>('');
+  const [reportToDelete, setReportToDelete] = useState<SavedReport | null>(null);
+  const [isDeletingReport, setIsDeletingReport] = useState<boolean>(false);
+  const reportDropdownRef = useRef<HTMLDivElement>(null);
+
+  const loadSavedReports = async () => {
+    try {
+      const list = await api.getReports();
+      setSavedReports(list);
+    } catch {
+      // ignore transient error
+    }
+  };
+
+  useEffect(() => {
+    loadSavedReports();
+  }, []);
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (reportDropdownRef.current && !reportDropdownRef.current.contains(e.target as Node)) {
+        setIsReportDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  const formatReportDate = (iso?: string) => {
+    if (!iso) return L('N/A', 'N/D');
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return L('N/A', 'N/D');
+    return `${d.toLocaleDateString(locale)} • ${d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}`;
+  };
+
+  const getReportFormat = (r: SavedReport): string => {
+    const fmt = r.summary?.format;
+    if (fmt) return fmt.toUpperCase();
+    const fp = (r.file_path || '').toLowerCase();
+    if (fp.endsWith('.pdf')) return 'PDF';
+    if (fp.endsWith('.docx')) return 'DOCX';
+    return 'HTML';
+  };
+
+  useEffect(() => {
+    let active = true;
+    fetch('/urielscan-header-uriel-ops.png')
+      .then((res) => (res.ok ? res.blob() : null))
+      .then((blob) => {
+        if (!blob || !active) return;
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          if (active && typeof reader.result === 'string') {
+            setUrielLogoDataUri(reader.result);
+          }
+        };
+        reader.readAsDataURL(blob);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const currentScan = scans.find((s) => s.id === scanId) || scans[0];
   const clientOrg = organizations.find((o) => o.id === currentScan?.org_id) || organizations[0];
-  const scanFindings = findings.filter((f) => f.scan_id === currentScan?.id);
+  const scanFindings = [...findings.filter((f) => f.scan_id === currentScan?.id)].sort(
+    (a, b) =>
+      (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9) ||
+      (b.cvss || 0) - (a.cvss || 0)
+  );
 
   const criticalCount = scanFindings.filter((f) => f.severity === 'Critical').length;
   const highCount = scanFindings.filter((f) => f.severity === 'High').length;
   const mediumCount = scanFindings.filter((f) => f.severity === 'Medium').length;
   const lowCount = scanFindings.filter((f) => f.severity === 'Low').length;
+  const infoCount = scanFindings.filter((f) => f.severity === 'Info').length;
 
   const escHtml = (val: unknown): string =>
     String(val ?? '')
@@ -103,11 +187,13 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
     const safeMsspName = escHtml(scannerProfile.company_name);
     const safeMsspLogo = safeDataImg(scannerProfile.logo_url);
     const safeClientLogo = safeDataImg(clientOrg?.logo_url);
+    const resolvedHeaderLogo = safeClientLogo || urielLogoDataUri;
+    const clientLogoAlt = L('Client Logo', 'Logo Cliente');
+    const resolvedHeaderLogoAlt = safeClientLogo ? clientLogoAlt : 'UrielScan';
     const safeExecNotes = escHtml(executiveNotes);
     const safeFooter = escHtml(scannerProfile.report_footer);
     const formattedDate = new Date().toLocaleDateString(locale);
     const msspLogoAlt = L('MSSP Logo', 'Logo MSSP');
-    const clientLogoAlt = L('Client Logo', 'Logo Cliente');
     const targetOrgLabel = L('Target Organization', 'Organizzazione Destinataria');
     const scanTargetsLabel = L('Scan Targets', 'Target di Scansione');
     const execSummaryTitle = L('1. Executive Summary & Risk Posture', '1. Sintesi Esecutiva & Postura di Rischio');
@@ -147,13 +233,15 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
     .header-bar { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #111315; padding-bottom: 15px; margin-bottom: 25px; }
     .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 11px; text-transform: uppercase; }
     .badge-confidential { background: #fee2e2; color: #991b1b; }
-    .badge-crit { background: #ef4444; color: #fff; }
+    .badge-crit, .badge-critical { background: #ef4444; color: #fff; }
     .badge-high { background: #ea580c; color: #fff; }
     .badge-med { background: #f59e0b; color: #fff; }
+    .badge-medium { background: #f59e0b; color: #fff; }
     .badge-low { background: #0284c7; color: #fff; }
+    .badge-info { background: #64748b; color: #fff; }
     h1 { font-size: 20px; color: #111315; margin: 0 0 5px 0; }
     h2 { font-size: 15px; color: #111315; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px; margin-top: 25px; }
-    .grid-kpi { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 15px 0; }
+    .grid-kpi { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 15px 0; }
     .kpi-card { background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px; border-radius: 4px; text-align: center; }
     .kpi-num { font-size: 20px; font-weight: bold; }
     .kpi-num.crit { color: #ef4444; }
@@ -168,23 +256,24 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
     <div style="display: flex; align-items: center; gap: 12px;">
       ${safeMsspLogo ? `<img src="${safeMsspLogo}" alt="${msspLogoAlt}" style="max-height: 40px; max-width: 120px; object-fit: contain;" />` : ''}
       <div>
-        <div style="font-weight: 800; font-size: 18px; letter-spacing: 0.5px;">URIELSCAN ASSESSMENT</div>
-        <div style="font-size: 12px; color: #4b5563;">${safeMsspName}</div>
+        <div style="font-weight: 800; font-size: 16px; letter-spacing: 0.4px;">${safeMsspName}</div>
+        <div style="margin-top: 4px;">
+          <span class="badge badge-confidential">${safeClassification}</span>
+          <span style="font-size: 11px; color: #6b7280; margin-left: 8px;">${L('Date', 'Data')}: ${formattedDate}</span>
+        </div>
       </div>
     </div>
-    <div style="display: flex; align-items: center; gap: 12px; text-align: right;">
-      <div>
-        <span class="badge badge-confidential">${safeClassification}</span>
-        <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">${L('Date', 'Data')}: ${formattedDate}</div>
-      </div>
-      ${safeClientLogo ? `<img src="${safeClientLogo}" alt="${clientLogoAlt}" style="max-height: 40px; max-width: 120px; object-fit: contain;" />` : ''}
+    <div style="display: flex; align-items: center; justify-content: flex-end; text-align: right;">
+      ${resolvedHeaderLogo ? `<img src="${escHtml(resolvedHeaderLogo)}" alt="${escHtml(resolvedHeaderLogoAlt)}" style="max-height: 36px; width: auto; object-fit: contain;" />` : '<div style="font-weight: 800; font-size: 18px; letter-spacing: 0.5px; color: #1e3a5f;">URIELSCAN</div>'}
     </div>
   </div>
 
-  <h1>${safeTitle}</h1>
-  <div style="font-size: 13px; color: #4b5563; margin-bottom: 20px;">
-    ${targetOrgLabel}: <strong>${safeOrgName}</strong> (${safeOrgIndustry})<br>
-    ${scanTargetsLabel}: <code>${safeTargets}</code>
+  <div style="margin-bottom: 18px;">
+    <h1>${safeTitle}</h1>
+    <div style="font-size: 13px; color: #4b5563;">
+      ${targetOrgLabel}: <strong>${safeOrgName}</strong> (${safeOrgIndustry})<br>
+      ${scanTargetsLabel}: <code>${safeTargets}</code>
+    </div>
   </div>
 
   <h2>${execSummaryTitle}</h2>
@@ -195,6 +284,7 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
     <div class="kpi-card"><div class="kpi-num high">${highCount}</div><div style="font-size:11px;">${highLabel}</div></div>
     <div class="kpi-card"><div class="kpi-num">${mediumCount}</div><div style="font-size:11px;">${medLabel}</div></div>
     <div class="kpi-card"><div class="kpi-num">${lowCount}</div><div style="font-size:11px;">${lowLabel}</div></div>
+    <div class="kpi-card"><div class="kpi-num" style="color:#64748b;">${infoCount}</div><div style="font-size:11px;">Info</div></div>
   </div>
 
   <h2>${remediationTitle}</h2>
@@ -250,16 +340,39 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
 </html>`;
   };
 
-  const handleDownloadHTML = () => {
-    const html = generateStandaloneHTML();
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `UrielScan_Report_${clientOrg?.name ? clientOrg.name.replace(/\s+/g, '_') : 'Assessment'}.html`;
-    link.click();
-    URL.revokeObjectURL(url);
-    showToast(L('HTML report downloaded successfully.', 'Report HTML scaricato con successo.'), 'success');
+  const handleDownloadHTML = async () => {
+    if (!currentScan) {
+      const html = generateStandaloneHTML();
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `UrielScan_Report_${clientOrg?.name ? clientOrg.name.replace(/\s+/g, '_') : 'Assessment'}.html`;
+      link.click();
+      URL.revokeObjectURL(url);
+      showToast(L('HTML report downloaded successfully.', 'Report HTML scaricato con successo.'), 'success');
+      return;
+    }
+    setExportingFormat('html');
+    try {
+      await api.downloadCustomReport({
+        scan_id: currentScan.id,
+        format: 'html',
+        report_title: reportTitle,
+        classification,
+        executive_notes: executiveNotes,
+        include_ai: includeAI,
+        include_evidence: includeEvidence,
+        include_host_topology: includeHostTopology,
+        lang,
+      });
+      await loadSavedReports();
+      showToast(L('HTML report saved and downloaded successfully.', 'Report HTML salvato e scaricato con successo.'), 'success');
+    } catch (err: any) {
+      showToast(err?.message || L('Error generating HTML report', 'Errore generazione report HTML'), 'error');
+    } finally {
+      setExportingFormat(null);
+    }
   };
 
   const handlePrintPDF = () => {
@@ -282,7 +395,7 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
     }
     setExportingFormat(format);
     try {
-      await (api.downloadCustomReport as any)({
+      await api.downloadCustomReport({
         scan_id: currentScan.id,
         format,
         report_title: reportTitle,
@@ -293,10 +406,11 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
         include_host_topology: includeHostTopology,
         lang,
       });
+      await loadSavedReports();
       showToast(
         format === 'docx'
-          ? L('Editable DOCX report downloaded successfully.', 'Report DOCX modificabile scaricato con successo.')
-          : L('PDF report downloaded successfully.', 'Report PDF scaricato con successo.'),
+          ? L('Editable DOCX report saved & downloaded.', 'Report DOCX modificabile salvato e scaricato.')
+          : L('PDF report saved & downloaded.', 'Report PDF salvato e scaricato.'),
         'success'
       );
     } catch (err: any) {
@@ -306,65 +420,289 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
     }
   };
 
+  if (showAllReports) {
+    const filteredSaved = savedReports.filter((r) => {
+      if (!reportSearch.trim()) return true;
+      const q = reportSearch.toLowerCase();
+      return (
+        r.title.toLowerCase().includes(q) ||
+        (r.org_name || '').toLowerCase().includes(q) ||
+        getReportFormat(r).toLowerCase().includes(q)
+      );
+    });
+
+    return (
+      <div className="space-y-4">
+        <div className="card-industrial p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center space-x-2 text-[10px] font-mono uppercase font-bold tracking-wider text-theme-accent">
+              <FileText className="w-3.5 h-3.5" />
+              <span>{L('Report Archive & Management', 'Archivio & Gestione Report')}</span>
+            </div>
+            <h1 className="text-base font-bold text-theme-primary tracking-tight mt-0.5">
+              {L('All Saved Reports', 'Tutti i Report Salvati')} ({savedReports.length})
+            </h1>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-theme-muted absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={reportSearch}
+                onChange={(e) => setReportSearch(e.target.value)}
+                placeholder={L('Filter by title, org, format...', 'Filtra per titolo, org, formato...')}
+                className="input-industrial pl-8 pr-3 py-1.5 text-xs w-56"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAllReports(false)}
+              className="btn-secondary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>{L('Back to Generator', 'Torna al Generatore')}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="card-industrial overflow-hidden">
+          {filteredSaved.length === 0 ? (
+            <div className="p-8 text-center text-xs text-theme-muted">
+              {L('No saved reports found.', 'Nessun report salvato trovato.')}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-theme bg-subtle text-[10px] font-mono uppercase text-theme-secondary">
+                    <th className="py-2.5 px-3">{L('Format', 'Formato')}</th>
+                    <th className="py-2.5 px-3">{L('Report Title', 'Titolo Report')}</th>
+                    <th className="py-2.5 px-3">{L('Organization', 'Organizzazione')}</th>
+                    <th className="py-2.5 px-3">{L('Generated At', 'Data & Ora')}</th>
+                    <th className="py-2.5 px-3 text-right">{L('Actions', 'Azioni')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-theme-subtle text-xs">
+                  {filteredSaved.map((r) => {
+                    const fmt = getReportFormat(r);
+                    return (
+                      <tr key={r.id} className="hover:bg-subtle/60 transition">
+                        <td className="py-2.5 px-3">
+                          <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border border-theme bg-panel text-theme-accent">
+                            {fmt}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 font-medium text-theme-primary max-w-md truncate" title={r.title}>
+                          {r.title}
+                        </td>
+                        <td className="py-2.5 px-3 text-theme-secondary">{r.org_name || `Org #${r.org_id}`}</td>
+                        <td className="py-2.5 px-3 font-mono text-[11px] text-theme-muted">
+                          {formatReportDate(r.created_at)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right space-x-1.5 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              api.openSavedReport(r.id, false).catch((e) => showToast(e?.message || 'Error', 'error'))
+                            }
+                            className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center space-x-1"
+                            title={L('View / Open Report', 'Visualizza / Apri Report')}
+                          >
+                            <Eye className="w-3 h-3" />
+                            <span>{L('View', 'Vedi')}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              api.openSavedReport(r.id, true).catch((e) => showToast(e?.message || 'Error', 'error'))
+                            }
+                            className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center space-x-1"
+                            title={L('Download File', 'Scarica File')}
+                          >
+                            <Download className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setReportToDelete(r)}
+                            className="btn-secondary px-2 py-1 text-[11px] text-red-400 hover:border-red-500/60 inline-flex items-center"
+                            title={L('Delete Report', 'Elimina Report')}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <ConfirmModal
+          isOpen={Boolean(reportToDelete)}
+          title={L('Delete Saved Report', 'Elimina Report Salvato')}
+          description={L(
+            `Are you sure you want to permanently delete "${reportToDelete?.title || ''}"?`,
+            `Sei sicuro di voler eliminare definitivamente "${reportToDelete?.title || ''}"?`
+          )}
+          confirmText={L('Delete Report', 'Elimina Report')}
+          isDestructive={true}
+          isLoading={isDeletingReport}
+          onCancel={() => setReportToDelete(null)}
+          onConfirm={async () => {
+            if (!reportToDelete) return;
+            setIsDeletingReport(true);
+            try {
+              const ok = await api.deleteReport(reportToDelete.id);
+              if (ok) {
+                setSavedReports((prev) => prev.filter((item) => item.id !== reportToDelete.id));
+                showToast(L('Report deleted successfully.', 'Report eliminato con successo.'), 'success');
+              }
+            } finally {
+              setIsDeletingReport(false);
+              setReportToDelete(null);
+            }
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="card-industrial p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center space-x-2 text-[11px] uppercase font-bold tracking-wider text-theme-accent">
-            <FileText className="w-3.5 h-3.5" />
-            <span>Report Center White-Label MSP</span>
+      <div className="card-industrial p-4 space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center space-x-2 text-[11px] uppercase font-bold tracking-wider text-theme-accent">
+              <FileText className="w-3.5 h-3.5" />
+              <span>Report Center White-Label MSP</span>
+            </div>
+            <h1 className="text-base font-bold text-theme-primary mt-0.5 tracking-tight">
+              {L('Security & Compliance Report Generator', 'Generatore Report di Sicurezza & Conformità')}
+            </h1>
+            <p className="text-xs text-theme-secondary mt-0.5">
+              {L(
+                'Export technical assessments and executive summaries ready for CISO sign-off and PDF printing.',
+                'Esporta valutazioni tecniche ed executive summary pronti per la firma del CISO e la stampa PDF.'
+              )}
+            </p>
           </div>
-          <h1 className="text-base font-bold text-theme-primary mt-0.5 tracking-tight">
-            {L('Security & Compliance Report Generator', 'Generatore Report di Sicurezza & Conformità')}
-          </h1>
-          <p className="text-xs text-theme-secondary mt-0.5">
-            {L(
-              'Export technical assessments and executive summaries ready for CISO sign-off and PDF printing.',
-              'Esporta valutazioni tecniche ed executive summary pronti per la firma del CISO e la stampa PDF.'
-            )}
-          </p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setIsPreviewOpen(true)}
+              className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
+            >
+              <Eye className="w-3.5 h-3.5 text-theme-accent" />
+              <span>{L('Preview', 'Anteprima')}</span>
+            </button>
+            <button
+              onClick={() => handleDownloadBackendReport('docx')}
+              disabled={!currentScan || exportingFormat !== null}
+              className="btn-primary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+              title={L('Download editable template in Word / LibreOffice Writer (.docx)', 'Scarica template modificabile in Word / LibreOffice Writer (.docx)')}
+            >
+              {exportingFormat === 'docx' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileEdit className="w-3.5 h-3.5" />}
+              <span>{L('Download DOCX (Editable)', 'Scarica DOCX (Modificabile)')}</span>
+            </button>
+            <button
+              onClick={() => handleDownloadBackendReport('pdf')}
+              disabled={!currentScan || exportingFormat !== null}
+              className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+              title={L('Download formatted PDF document', 'Scarica documento PDF impaginato')}
+            >
+              {exportingFormat === 'pdf' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              <span>{L('Download PDF', 'Scarica PDF')}</span>
+            </button>
+            <button
+              onClick={handleDownloadHTML}
+              disabled={exportingFormat !== null}
+              className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+            >
+              {exportingFormat === 'html' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              <span>HTML</span>
+            </button>
+            <button
+              onClick={handlePrintPDF}
+              className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>{L('Print', 'Stampa')}</span>
+            </button>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Saved Reports Quick Switcher & "View all" */}
+        <div className="pt-3 border-t border-theme-subtle flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-mono uppercase font-bold tracking-wider text-theme-muted flex items-center space-x-1">
+              <Clock className="w-3 h-3 text-theme-accent" />
+              <span>{L('Saved Reports', 'Report Salvati')}</span>
+            </span>
+
+            <div className="relative" ref={reportDropdownRef}>
+              <button
+                type="button"
+                onClick={() => setIsReportDropdownOpen((prev) => !prev)}
+                className="input-industrial px-2.5 py-1 text-left flex items-center justify-between gap-3 min-w-[260px] max-w-[430px]"
+              >
+                <div className="min-w-0">
+                  {savedReports.length > 0 ? (
+                    <>
+                      <div className="text-xs font-semibold text-theme-primary truncate">
+                        [{getReportFormat(savedReports[0])}] {savedReports[0].title}
+                      </div>
+                      <div className="text-[10px] font-mono text-theme-muted truncate">
+                        {formatReportDate(savedReports[0].created_at)} — {savedReports[0].org_name || `Org #${savedReports[0].org_id}`}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-theme-muted py-0.5">
+                      {L('No exported reports yet', 'Nessun report esportato finora')}
+                    </div>
+                  )}
+                </div>
+                <ChevronDown className={`w-3.5 h-3.5 text-theme-muted shrink-0 transition-transform ${isReportDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isReportDropdownOpen && savedReports.length > 0 && (
+                <div className="absolute left-0 top-full mt-1 w-96 bg-panel border border-theme rounded shadow-xl z-50 max-h-72 overflow-y-auto py-1">
+                  {savedReports.map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => {
+                        setIsReportDropdownOpen(false);
+                        api.openSavedReport(r.id, false).catch((e) => showToast(e?.message || 'Error', 'error'));
+                      }}
+                      className="w-full px-3 py-2 text-left hover:bg-hover transition border-b border-theme-subtle last:border-b-0 cursor-pointer"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-theme-primary truncate">{r.title}</span>
+                        <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-accent shrink-0">
+                          {getReportFormat(r)}
+                        </span>
+                      </div>
+                      <div className="text-[10px] font-mono text-theme-muted mt-0.5 truncate">
+                        {formatReportDate(r.created_at)} • {r.org_name || `Org #${r.org_id}`}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           <button
-            onClick={() => setIsPreviewOpen(true)}
-            className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
+            type="button"
+            onClick={() => setShowAllReports(true)}
+            className="btn-secondary px-2.5 py-1.5 text-xs font-semibold flex items-center space-x-1.5"
           >
-            <Eye className="w-3.5 h-3.5 text-theme-accent" />
-            <span>{L('Preview', 'Anteprima')}</span>
-          </button>
-          <button
-            onClick={() => handleDownloadBackendReport('docx')}
-            disabled={!currentScan || exportingFormat !== null}
-            className="btn-primary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
-            title={L('Download editable template in Word / LibreOffice Writer (.docx)', 'Scarica template modificabile in Word / LibreOffice Writer (.docx)')}
-          >
-            {exportingFormat === 'docx' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileEdit className="w-3.5 h-3.5" />}
-            <span>{L('Download DOCX (Editable)', 'Scarica DOCX (Modificabile)')}</span>
-          </button>
-          <button
-            onClick={() => handleDownloadBackendReport('pdf')}
-            disabled={!currentScan || exportingFormat !== null}
-            className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
-            title={L('Download formatted PDF document', 'Scarica documento PDF impaginato')}
-          >
-            {exportingFormat === 'pdf' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            <span>{L('Download PDF', 'Scarica PDF')}</span>
-          </button>
-          <button
-            onClick={handleDownloadHTML}
-            className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>HTML</span>
-          </button>
-          <button
-            onClick={handlePrintPDF}
-            className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>{L('Print', 'Stampa')}</span>
+            <List className="w-3.5 h-3.5 text-theme-accent" />
+            <span>{L('View all', 'Vedi tutti')} ({savedReports.length})</span>
           </button>
         </div>
       </div>

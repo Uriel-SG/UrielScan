@@ -1,6 +1,11 @@
 import os
+import re
+import hashlib
+import secrets
 import sys
+import time
 import json
+import asyncio
 import platform
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -20,7 +25,9 @@ from backend.database import (
     get_findings_for_scan, update_finding_status, get_dashboard_stats,
     get_user_by_username, update_user_password, set_user_pending_totp,
     enable_user_totp, disable_user_totp,
-    create_agent, get_agents, get_agent_by_id, get_agent_by_token, delete_agent, update_agent_heartbeat
+    create_agent, get_agents, get_agent_by_id, get_agent_by_token, delete_agent, update_agent_heartbeat,
+    rotate_agent_token, create_ai_report, get_ai_reports, get_ai_report_by_id, delete_ai_report,
+    REPORTS_DIR as DB_REPORTS_DIR
 )
 from backend.auth import (
     hash_password, verify_password,
@@ -33,7 +40,11 @@ from backend.auth import (
 )
 from backend.scanners.nmap_engine import detect_nmap, get_nse_catalog
 from backend.scanners.nuclei_engine import detect_nuclei, install_nuclei
+from backend.scanners.zap_engine import detect_zap
+from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.orchestrator import start_scan_in_background, stop_scan
+from backend.scanners.nat_guard import check_targets_nat_loopback
+from backend.probe_packager import build_windows_msi, build_linux_sh
 from backend.ai_engine import test_ai_connection, analyze_findings
 from backend.report_engine import generate_html_report
 from backend.export_engine import (
@@ -96,7 +107,7 @@ async def enforce_api_auth_and_security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    if path.startswith("/api/reports/") and path.endswith("/view"):
+    if path.startswith("/api/reports/") and path.endswith("/view") and response.headers.get("content-type", "").startswith("text/html"):
         response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
     return response
 
@@ -202,12 +213,21 @@ class ScanCreateModel(BaseModel):
     nuclei_tags: Optional[List[str]] = None
     nuclei_severity: Optional[List[str]] = None
     web_checks: Optional[List[str]] = None
+    zap_mode: Optional[str] = "baseline"
     agent_id: Optional[int | str] = None
 
 
 class AgentCreateModel(BaseModel):
     org_id: int | str
     name: str = Field(..., min_length=1)
+
+
+class ProbeInstallerRequest(BaseModel):
+    platform: str = Field(..., pattern="^(windows_msi|linux_sh)$")
+    server_url: Optional[str] = None
+    token: Optional[str] = None
+    insecure: bool = False
+    interval: int = Field(5, ge=2, le=300)
 
 
 class ProbeHeartbeatModel(BaseModel):
@@ -309,6 +329,7 @@ def _parse_int_id(val: Any, default: int = 1) -> int:
 async def get_system_status():
     nmap_info = detect_nmap()
     nuclei_info = detect_nuclei()
+    zap_info = detect_zap()
 
     return {
         "status": "healthy",
@@ -325,7 +346,8 @@ async def get_system_status():
                 "features": ["TCP Port Scan", "Banner Grab", "SSL/TLS Inspection", "Web Security Headers", "CORS Misconfig", "Sensitive Endpoints Discovery"]
             },
             "nmap": nmap_info,
-            "nuclei": nuclei_info
+            "nuclei": nuclei_info,
+            "zap": zap_info
         }
     }
 
@@ -345,6 +367,7 @@ async def reset_all_data(include_organizations: bool = Query(False)):
     with conn:
         conn.execute("DELETE FROM findings;")
         conn.execute("DELETE FROM reports;")
+        conn.execute("DELETE FROM ai_reports;")
         conn.execute("DELETE FROM schedules;")
         conn.execute("DELETE FROM scans;")
         if include_organizations:
@@ -738,6 +761,8 @@ async def create_and_start_scan(payload: ScanCreateModel):
         cfg["nuclei_severities"] = payload.nuclei_severity
     if payload.web_checks:
         cfg["web_checks"] = payload.web_checks
+    if payload.zap_mode and "zap_mode" not in cfg:
+        cfg["zap_mode"] = payload.zap_mode
 
     profile = payload.scan_type or payload.scan_profile or "standard"
 
@@ -948,12 +973,21 @@ async def list_all_findings(
 ):
     if scan_id:
         return get_findings_for_scan(_parse_int_id(scan_id))
+    sev_order = """
+        CASE LOWER(severity)
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END ASC, cvss DESC, id ASC
+    """
     conn = get_db_connection()
     if org_id:
         oid = _parse_int_id(org_id)
-        rows = conn.execute("SELECT * FROM findings WHERE org_id = ? ORDER BY cvss DESC;", (oid,)).fetchall()
+        rows = conn.execute(f"SELECT * FROM findings WHERE org_id = ? ORDER BY {sev_order};", (oid,)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM findings ORDER BY cvss DESC;").fetchall()
+        rows = conn.execute(f"SELECT * FROM findings ORDER BY {sev_order};").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1031,9 +1065,9 @@ async def ai_analyze_endpoint(req: AIAnalyzeRequest):
     perimeter_lbl = "Perimetro target" if is_it else "Target perimeter"
     result["mitre_techniques"] = [
         {
-            "id": m.get("technique", "T1190").split()[0],
-            "name": m.get("technique", "Exploit Public-Facing Application"),
-            "tactic": m.get("tactic", "Initial Access"),
+            "id": ((m.get("technique") or "T1190").split() or ["T1190"])[0],
+            "name": m.get("technique") or "Exploit Public-Facing Application",
+            "tactic": m.get("tactic") or "Initial Access",
             "description": f"{detected_lbl}: {', '.join(m.get('assets', ['Target']))}" if isinstance(m.get("assets"), list) else str(m.get("assets", perimeter_lbl))
         }
         if isinstance(m, dict) else {"id": "T1190", "name": str(m), "tactic": "Initial Access", "description": ""}
@@ -1050,7 +1084,54 @@ async def ai_analyze_endpoint(req: AIAnalyzeRequest):
             conn.execute("UPDATE scans SET ai_analysis_json = ? WHERE id = ?;", (json.dumps(result), sid))
         conn.close()
 
+    # Persist AI report in ai_reports table for Report Management / "View all"
+    ai_mode = req.mode or "purple_team"
+    scope_type = "findings" if (req.finding_ids and len(req.finding_ids) > 0) else "global"
+    md_sections = [
+        f"# {ai_mode.upper()} — {scan.get('name', f'Scan #{sid}')}",
+        f"**Targets:** {scan.get('targets', '')}",
+        "",
+        "## Executive Summary",
+        str(result.get("executive_summary") or ""),
+    ]
+    if result.get("red_team_paths"):
+        md_sections += ["", "## Red Team Attack Paths"] + [f"- {p}" for p in result["red_team_paths"]]
+    if result.get("blue_team_priorities"):
+        md_sections += ["", "## Blue Team Hardening Priorities"] + [f"- {p}" for p in result["blue_team_priorities"]]
+    if result.get("remediation_script"):
+        md_sections += ["", "## Remediation Playbook", "```bash", str(result["remediation_script"]), "```"]
+
+    ai_report_id = f"AIRPT-{secrets.token_hex(4).upper()}"
+    ai_title = f"[{ai_mode.replace('_', ' ').upper()}] {scan.get('name', f'Scan #{sid}')}"
+    saved_ai_report = create_ai_report(
+        report_id=ai_report_id,
+        org_id=int(scan.get("org_id") or org.get("id") or 1),
+        mode=ai_mode,
+        scope_type=scope_type,
+        title=ai_title,
+        model_used=str(result.get("model_used") or settings.get("ai_model") or "local"),
+        locale=lang,
+        prompt=req.extra_prompt or req.prompt or "",
+        content_md="\n".join(md_sections).strip(),
+        scan_id=sid,
+    )
+    result["saved_report"] = saved_ai_report
+
     return result
+
+
+@app.get("/api/ai/reports")
+async def list_ai_reports_endpoint(org_id: Optional[str] = Query(None)):
+    oid = _parse_int_id(org_id) if org_id else None
+    return get_ai_reports(org_id=oid)
+
+
+@app.delete("/api/ai/reports/{report_id}")
+async def delete_ai_report_endpoint(report_id: str):
+    deleted = delete_ai_report(report_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="AI report not found.")
+    return {"success": True, "deleted_id": report_id}
 
 
 # ==========================================
@@ -1137,6 +1218,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
     ai_analysis = scan.get("ai_analysis") if req.include_ai else None
 
     fmt = req.format.lower()
+    saved_report_id = ""
     if fmt == "pdf":
         data = generate_pdf_document(
             report_title=title,
@@ -1180,6 +1262,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             custom_title=title,
             lang=lang,
         )
+        saved_report_id = report_data.get("id", "")
         file_path = report_data.get("file_path", "")
         if not file_path or not os.path.isfile(file_path):
             raise HTTPException(status_code=500, detail="Errore nella generazione del report HTML." if is_it else "Error generating HTML report.")
@@ -1188,11 +1271,57 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
         media_type = "text/html; charset=utf-8"
         filename = f"urielscan_report_scan_{sid}.html"
 
+    # Persist exported PDF / DOCX reports into DB & reports/ folder so Report History tracks all exports
+    if fmt in ("pdf", "docx"):
+        DB_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        saved_report_id = f"RPT-{sid}-{secrets.token_hex(3).upper()}"
+        out_path = DB_REPORTS_DIR / f"{saved_report_id}.{fmt}"
+        out_path.write_bytes(data)
+        summary_meta = {
+            "format": fmt,
+            "risk_score": (scan.get("summary") or {}).get("risk_score", 0),
+            "total_findings": len(findings),
+            "include_ai": bool(req.include_ai),
+        }
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn = get_db_connection()
+        with conn:
+            conn.execute("""
+                INSERT INTO reports (id, scan_id, org_id, title, classification, created_at, file_path, summary_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                saved_report_id,
+                sid,
+                int(scan.get("org_id") or 1),
+                title,
+                classification,
+                now_iso,
+                str(out_path),
+                json.dumps(summary_meta),
+            ))
+        conn.close()
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Access-Control-Expose-Headers": "X-Report-Id",
+    }
+    if saved_report_id:
+        headers["X-Report-Id"] = saved_report_id
+
     return Response(
         content=data,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=headers,
     )
+
+
+def _resolve_report_media(file_path: str, report_id: str):
+    ext = Path(file_path).suffix.lower()
+    if ext == ".pdf":
+        return "application/pdf", f"{report_id}.pdf"
+    if ext == ".docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{report_id}.docx"
+    return "text/html", f"{report_id}.html"
 
 
 @app.get("/api/reports/{report_id}/view")
@@ -1203,7 +1332,10 @@ async def view_report(report_id: str):
     if not row or not os.path.isfile(row["file_path"]):
         raise HTTPException(status_code=404, detail="File di report non trovato.")
 
-    return FileResponse(row["file_path"], media_type="text/html")
+    media_type, filename = _resolve_report_media(row["file_path"], report_id)
+    if filename.endswith(".docx"):
+        return FileResponse(row["file_path"], media_type=media_type, filename=filename)
+    return FileResponse(row["file_path"], media_type=media_type)
 
 
 @app.get("/api/reports/{report_id}/download")
@@ -1214,8 +1346,8 @@ async def download_report(report_id: str):
     if not row or not os.path.isfile(row["file_path"]):
         raise HTTPException(status_code=404, detail="File di report non trovato.")
 
-    filename = f"{report_id}.html"
-    return FileResponse(row["file_path"], media_type="text/html", filename=filename)
+    media_type, filename = _resolve_report_media(row["file_path"], report_id)
+    return FileResponse(row["file_path"], media_type=media_type, filename=filename)
 
 
 @app.delete("/api/reports/{report_id}")
@@ -1411,6 +1543,12 @@ def _require_agent(x_agent_token: Optional[str] = Header(None)) -> Dict[str, Any
     return agent
 
 
+@app.get("/api/network/nat-check")
+async def network_nat_check(targets: str = Query("")):
+    targets_list = [t.strip() for t in targets.split(",") if t.strip()]
+    return await asyncio.to_thread(check_targets_nat_loopback, targets_list)
+
+
 @app.get("/api/agents")
 async def list_agents(org_id: Optional[str] = Query(None)):
     oid = _parse_int_id(org_id) if org_id else None
@@ -1427,12 +1565,198 @@ async def create_agent_endpoint(payload: AgentCreateModel):
     return agent
 
 
+_INSTALLER_TICKET_TTL_SEC = 86400
+_INSTALLER_TICKETS: Dict[str, Dict[str, Any]] = {}
+
+
+def _prune_installer_tickets() -> None:
+    now = time.time()
+    expired = [k for k, v in _INSTALLER_TICKETS.items() if v.get("expires_at", 0) <= now]
+    for k in expired:
+        _INSTALLER_TICKETS.pop(k, None)
+
+
+def _resolve_server_url_from_request(explicit_url: Optional[str], request: Request) -> str:
+    server_url = (explicit_url or "").strip().rstrip("/")
+    if server_url:
+        return server_url
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+@app.post("/api/agents/{agent_id}/installer")
+async def generate_agent_installer_endpoint(agent_id: str, payload: ProbeInstallerRequest, request: Request):
+    aid = _parse_int_id(agent_id)
+    agent = get_agent_by_id(aid)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente non trovato.")
+
+    token = (payload.token or "").strip()
+    if not token:
+        rotated = rotate_agent_token(aid)
+        if not rotated or not rotated.get("token"):
+            raise HTTPException(status_code=500, detail="Impossibile generare nuova chiave agente.")
+        token = rotated["token"]
+
+    server_url = _resolve_server_url_from_request(payload.server_url, request)
+    safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", agent.get("name", f"probe-{aid}")).strip("-").lower() or f"probe-{aid}"
+
+    try:
+        if payload.platform == "windows_msi":
+            content = await asyncio.to_thread(
+                build_windows_msi,
+                agent["name"],
+                token,
+                server_url,
+                bool(payload.insecure),
+                int(payload.interval),
+            )
+            return Response(
+                content=content,
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": f'attachment; filename="urielscan-probe-{safe_slug}.msi"',
+                    "Access-Control-Expose-Headers": "Content-Disposition",
+                },
+            )
+        else:
+            content = await asyncio.to_thread(
+                build_linux_sh,
+                agent["name"],
+                token,
+                server_url,
+                bool(payload.insecure),
+                int(payload.interval),
+            )
+            return Response(
+                content=content,
+                media_type="text/x-shellscript",
+                headers={
+                    "Content-Disposition": f'attachment; filename="urielscan-probe-{safe_slug}.sh"',
+                    "Access-Control-Expose-Headers": "Content-Disposition",
+                },
+            )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/agents/{agent_id}/installer-link")
+async def create_agent_installer_link(agent_id: str, payload: ProbeInstallerRequest, request: Request):
+    aid = _parse_int_id(agent_id)
+    agent = get_agent_by_id(aid)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente non trovato.")
+
+    token = (payload.token or "").strip()
+    if not token:
+        rotated = rotate_agent_token(aid)
+        if not rotated or not rotated.get("token"):
+            raise HTTPException(status_code=500, detail="Impossibile generare nuova chiave agente.")
+        token = rotated["token"]
+
+    server_url = _resolve_server_url_from_request(payload.server_url, request)
+    safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", agent.get("name", f"probe-{aid}")).strip("-").lower() or f"probe-{aid}"
+    ext = "msi" if payload.platform == "windows_msi" else "sh"
+    filename = f"urielscan-probe-{safe_slug}.{ext}"
+
+    _prune_installer_tickets()
+    ticket = secrets.token_urlsafe(32)
+    ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+    _INSTALLER_TICKETS[ticket_hash] = {
+        "agent_id": aid,
+        "agent_name": agent["name"],
+        "platform": payload.platform,
+        "server_url": server_url,
+        "token": token,
+        "insecure": bool(payload.insecure),
+        "interval": int(payload.interval),
+        "filename": filename,
+        "expires_at": time.time() + _INSTALLER_TICKET_TTL_SEC,
+    }
+
+    local_download_path = f"/api/agent/installer/{ticket}"
+    download_url = f"{server_url}{local_download_path}"
+
+    if payload.platform == "windows_msi":
+        insecure_ps = "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; " if payload.insecure else ""
+        silent_command = (
+            f'[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; '
+            f'{insecure_ps}$msi = "$env:TEMP\\{filename}"; '
+            f'Invoke-WebRequest -Uri "{download_url}" -OutFile $msi -UseBasicParsing; '
+            f'Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -WindowStyle Hidden'
+        )
+    else:
+        curl_flags = "-fsSLk" if payload.insecure else "-fsSL"
+        silent_command = f'curl {curl_flags} "{download_url}" -o /tmp/{filename} && sudo bash /tmp/{filename} && rm -f /tmp/{filename}'
+
+    return {
+        "agent_id": aid,
+        "agent_name": agent["name"],
+        "platform": payload.platform,
+        "filename": filename,
+        "download_url": download_url,
+        "local_download_path": local_download_path,
+        "silent_command": silent_command,
+        "expires_in_seconds": _INSTALLER_TICKET_TTL_SEC,
+    }
+
+
+@app.get("/api/agent/installer/{ticket}")
+async def download_agent_installer_by_ticket(ticket: str):
+    _prune_installer_tickets()
+    ticket_hash = hashlib.sha256((ticket or "").encode("utf-8")).hexdigest()
+    entry = _INSTALLER_TICKETS.get(ticket_hash)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Installer link expired or invalid.")
+
+    agent = get_agent_by_id(entry["agent_id"])
+    if not agent:
+        _INSTALLER_TICKETS.pop(ticket_hash, None)
+        raise HTTPException(status_code=404, detail="Probe agent has been revoked.")
+
+    try:
+        if entry["platform"] == "windows_msi":
+            content = await asyncio.to_thread(
+                build_windows_msi,
+                entry["agent_name"],
+                entry["token"],
+                entry["server_url"],
+                bool(entry["insecure"]),
+                int(entry["interval"]),
+            )
+            media_type = "application/octet-stream"
+        else:
+            content = await asyncio.to_thread(
+                build_linux_sh,
+                entry["agent_name"],
+                entry["token"],
+                entry["server_url"],
+                bool(entry["insecure"]),
+                int(entry["interval"]),
+            )
+            media_type = "text/x-shellscript"
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.delete("/api/agents/{agent_id}")
 async def delete_agent_endpoint(agent_id: str):
     aid = _parse_int_id(agent_id)
     deleted = delete_agent(aid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Agente non trovato.")
+    for k in [tk for tk, tv in _INSTALLER_TICKETS.items() if tv.get("agent_id") == aid]:
+        _INSTALLER_TICKETS.pop(k, None)
     return {"success": True, "message": "Agente eliminato con successo."}
 
 
@@ -1581,8 +1905,8 @@ async def probe_upload_results(
             incoming_logs = payload.logs_json
     final_logs = existing_logs + incoming_logs if incoming_logs else existing_logs
 
-    # Compute findings & summary
-    findings = payload.findings or []
+    # Consolidate, deduplicate across engines, and sort findings by severity
+    findings = consolidate_findings(payload.findings or [])
     crit = sum(1 for f in findings if str(f.get("severity", "")).lower() == "critical")
     high = sum(1 for f in findings if str(f.get("severity", "")).lower() == "high")
     med = sum(1 for f in findings if str(f.get("severity", "")).lower() == "medium")

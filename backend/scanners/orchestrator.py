@@ -7,6 +7,13 @@ from backend.database import get_db_connection, get_scan_by_id, get_settings, ge
 from backend.scanners.native_engine import run_native_net_scan, run_native_ssl_scan, run_native_web_scan
 from backend.scanners.nmap_engine import detect_nmap, run_nmap_scan
 from backend.scanners.nuclei_engine import detect_nuclei, run_nuclei_scan
+from backend.scanners.zap_engine import detect_zap, run_zap_scan
+from backend.scanners.deduplicator import consolidate_findings
+from backend.scanners.nat_guard import (
+    check_targets_nat_loopback,
+    query_external_wan_internetdb,
+    filter_loopback_artifacts,
+)
 from backend.ai_engine import analyze_findings
 
 STOP_FLAGS: Dict[int, bool] = {}
@@ -92,8 +99,23 @@ async def run_scan_pipeline(scan_id: int) -> None:
 
     all_hosts: Dict[str, Dict[str, Any]] = {}
     all_findings: List[Dict[str, Any]] = []
+    nat_status: Dict[str, Any] = {"has_nat_loopback": False, "details": []}
+    wan_info: Dict[str, Any] = {"ok": False, "ports": []}
 
     try:
+        targets_list = [t.strip() for t in (targets.split(",") if isinstance(targets, str) else targets) if t.strip()]
+        if targets_list:
+            try:
+                nat_status = await asyncio.to_thread(check_targets_nat_loopback, targets_list)
+                if nat_status.get("has_nat_loopback") and nat_status.get("egress_public_ip"):
+                    egress_ip = nat_status["egress_public_ip"]
+                    append_log(
+                        "WARN",
+                        f"NAT Loopback Guard: target {', '.join(nat_status.get('loopback_targets', []))} corrisponde all'IP pubblico di uscita ({egress_ip}). Verifica WAN esterna e filtro falsi positivi LAN attivo.",
+                    )
+                    wan_info = await asyncio.to_thread(query_external_wan_internetdb, egress_ip)
+            except Exception as nat_exc:
+                append_log("WARN", f"NAT Guard pre-check non riuscito: {nat_exc}")
         if STOP_FLAGS.get(scan_id, False):
             return
 
@@ -230,33 +252,35 @@ async def run_scan_pipeline(scan_id: int) -> None:
             return
 
         # -------------------------------------------------------------
-        # 4. Nuclei Execution (if requested and installed)
+        # 4. Nuclei & 4b. OWASP ZAP Web Execution
         # -------------------------------------------------------------
+        def _resolve_web_target_urls() -> str:
+            has_cidr = any("/" in t and t.split("/", 1)[1].isdigit() for t in targets.replace(",", " ").split())
+            if not has_cidr:
+                return targets
+            if web_capable_hosts:
+                web_urls: List[str] = []
+                for ip in web_capable_hosts:
+                    h_obj = all_hosts.get(ip, {})
+                    for p in h_obj.get("ports", []):
+                        port_num = p.get("port")
+                        if port_num in {80, 8000, 8008, 8080, 8888, 3000, 5000, 9000}:
+                            web_urls.append(f"http://{ip}" if port_num == 80 else f"http://{ip}:{port_num}")
+                        elif port_num in {443, 8443}:
+                            web_urls.append(f"https://{ip}" if port_num == 443 else f"https://{ip}:{port_num}")
+                return ", ".join(dict.fromkeys(web_urls))
+            return ""
+
+        web_scan_targets_str = _resolve_web_target_urls() if ("nuclei" in engines or "zap" in engines) else ""
+
         if "nuclei" in engines:
             nuclei_det = detect_nuclei()
             if nuclei_det["installed"]:
-                has_cidr = any("/" in t and t.split("/", 1)[1].isdigit() for t in targets.replace(",", " ").split())
-                nuclei_targets_str = ""
-                if not has_cidr:
-                    nuclei_targets_str = targets
-                elif web_capable_hosts:
-                    # Build actual HTTP/HTTPS URLs from discovered web hosts instead of passing a raw CIDR block
-                    web_urls: List[str] = []
-                    for ip in web_capable_hosts:
-                        h_obj = all_hosts.get(ip, {})
-                        for p in h_obj.get("ports", []):
-                            port_num = p.get("port")
-                            if port_num in {80, 8000, 8008, 8080, 8888, 3000, 5000, 9000}:
-                                web_urls.append(f"http://{ip}" if port_num == 80 else f"http://{ip}:{port_num}")
-                            elif port_num in {443, 8443}:
-                                web_urls.append(f"https://{ip}" if port_num == 443 else f"https://{ip}:{port_num}")
-                    nuclei_targets_str = ", ".join(dict.fromkeys(web_urls))
-
-                if nuclei_targets_str:
-                    update_progress(78, "Esecuzione Nuclei Template & CVE Scan...")
-                    append_log("INFO", f"Esecuzione Nuclei ({nuclei_det['version']}) sui percorsi Web: {nuclei_targets_str}")
+                if web_scan_targets_str:
+                    update_progress(75, "Esecuzione Nuclei Template & CVE Scan...")
+                    append_log("INFO", f"Esecuzione Nuclei ({nuclei_det['version']}) sui percorsi Web: {web_scan_targets_str}")
                     nuclei_findings = await run_nuclei_scan(
-                        targets=nuclei_targets_str,
+                        targets=web_scan_targets_str,
                         tags=config.get("nuclei_tags"),
                         severities=config.get("nuclei_severities"),
                         log_callback=append_log
@@ -270,36 +294,36 @@ async def run_scan_pipeline(scan_id: int) -> None:
         if STOP_FLAGS.get(scan_id, False):
             return
 
+        if "zap" in engines:
+            zap_det = detect_zap()
+            if zap_det["installed"]:
+                if web_scan_targets_str:
+                    zap_mode = config.get("zap_mode", "baseline")
+                    update_progress(83, "Esecuzione OWASP ZAP Web Application Scan...")
+                    append_log("INFO", f"Esecuzione {zap_det['version']} ({zap_mode}) su: {web_scan_targets_str}")
+                    zap_findings = await run_zap_scan(
+                        targets=web_scan_targets_str,
+                        zap_mode=zap_mode,
+                        log_callback=append_log,
+                    )
+                    all_findings.extend(zap_findings)
+                else:
+                    append_log("INFO", "Nessun servizio Web attivo rilevato sulla subnet CIDR: scansione OWASP ZAP saltata.")
+            else:
+                append_log("WARN", "OWASP ZAP non rilevato (daemon API/CLI assente): modulo ZAP saltato.")
+
+        if STOP_FLAGS.get(scan_id, False):
+            return
+
         # -------------------------------------------------------------
-        # 5. Summary & Risk Score Calculation
+        # 5. Summary, Cross-Engine Deduplication & Risk Score Calculation
         # -------------------------------------------------------------
         update_progress(88, "Consolidamento vulnerabilità e calcolo Risk Posture...")
-        append_log("INFO", "Consolidamento evidenze e normalizzazione finding...")
+        append_log("INFO", "Deduplicazione cross-motore (ZAP/Nuclei/Nmap/Native) e ordinamento per severità...")
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        unique_findings: List[Dict[str, Any]] = []
-        seen_keys = set()
-        for f in all_findings:
-            key = (f.get("host"), f.get("port"), f.get("title"))
-            if key not in seen_keys:
-                seen_keys.add(key)
-                unique_findings.append(f)
-
-        crit_count = sum(1 for f in unique_findings if f.get("severity") == "critical")
-        high_count = sum(1 for f in unique_findings if f.get("severity") == "high")
-        med_count = sum(1 for f in unique_findings if f.get("severity") == "medium")
-        low_count = sum(1 for f in unique_findings if f.get("severity") == "low")
-        info_count = sum(1 for f in unique_findings if f.get("severity") == "info")
-
-        risk_score = min(100, int((crit_count * 25) + (high_count * 15) + (med_count * 5) + (low_count * 2)))
-        risk_label = "BASSO"
-        if risk_score >= 75:
-            risk_label = "CRITICO"
-        elif risk_score >= 50:
-            risk_label = "ALTO"
-        elif risk_score >= 25:
-            risk_label = "MEDIO"
+        unique_findings = consolidate_findings(all_findings)
 
         # Ensure hosts discovered exclusively via Web/SSL/Nuclei engines also appear in hosts_list
         for f in unique_findings:
@@ -324,6 +348,36 @@ async def run_scan_pipeline(scan_id: int) -> None:
                     })
 
         hosts_list = list(all_hosts.values())
+        nat_stats: Dict[str, Any] = {}
+        if nat_status.get("has_nat_loopback") and nat_status.get("egress_public_ip"):
+            hosts_list, unique_findings, nat_stats = filter_loopback_artifacts(
+                nat_status.get("details", []),
+                hosts_list,
+                unique_findings,
+                wan_info,
+                nat_status["egress_public_ip"],
+                locale=settings.get("locale", "en"),
+            )
+            append_log(
+                "INFO",
+                f"NAT Loopback Guard completato: porte esterne={nat_stats.get('confirmed_wan_ports', [])}, soppressi {nat_stats.get('suppressed_findings', 0)} finding hairpin.",
+            )
+
+        crit_count = sum(1 for f in unique_findings if f.get("severity") == "critical")
+        high_count = sum(1 for f in unique_findings if f.get("severity") == "high")
+        med_count = sum(1 for f in unique_findings if f.get("severity") == "medium")
+        low_count = sum(1 for f in unique_findings if f.get("severity") == "low")
+        info_count = sum(1 for f in unique_findings if f.get("severity") == "info")
+
+        risk_score = min(100, int((crit_count * 25) + (high_count * 15) + (med_count * 5) + (low_count * 2)))
+        risk_label = "BASSO"
+        if risk_score >= 75:
+            risk_label = "CRITICO"
+        elif risk_score >= 50:
+            risk_label = "ALTO"
+        elif risk_score >= 25:
+            risk_label = "MEDIO"
+
         summary = {
             "total_hosts": len(hosts_list),
             "up_hosts": len(hosts_list),
@@ -336,7 +390,9 @@ async def run_scan_pipeline(scan_id: int) -> None:
             "info": info_count,
             "risk_score": risk_score,
             "risk_label": risk_label,
-            "engines_used": engines
+            "engines_used": engines,
+            "nat_loopback_detected": bool(nat_stats),
+            "nat_guard": nat_stats,
         }
 
         with conn:

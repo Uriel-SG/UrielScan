@@ -1,6 +1,6 @@
 export type SeverityLevel = 'Critical' | 'High' | 'Medium' | 'Low' | 'Info';
 
-export type EngineSource = 'nmap' | 'nuclei' | 'native_web' | 'native_net';
+export type EngineSource = 'nmap' | 'nuclei' | 'zap' | 'native_web' | 'native_net' | string;
 
 export type FindingStatus = 'open' | 'in_progress' | 'resolved' | 'false_positive';
 
@@ -68,7 +68,7 @@ export interface RemoteAgent {
   hostname?: string;
   ip_address?: string;
   os_info?: string;
-  engines?: { nmap?: boolean; nuclei?: boolean; native?: boolean };
+  engines?: { nmap?: boolean; nuclei?: boolean; zap?: boolean; native?: boolean };
   version?: string;
   created_at: string;
 }
@@ -87,6 +87,7 @@ export interface Scan {
   nuclei_tags?: string[];
   nuclei_severity?: string[];
   web_checks?: string[];
+  zap_mode?: 'baseline' | 'full';
   status: ScanStatus;
   progress: number;
   started_at: string;
@@ -144,6 +145,11 @@ export interface EngineStatus {
     available: boolean;
     version?: string;
   };
+  zap?: {
+    available: boolean;
+    version?: string;
+    mode?: string;
+  };
   native: {
     available: boolean;
   };
@@ -196,4 +202,60 @@ export interface Setup2FAResponse {
   secret: string;
   otpauth_uri: string;
   qr_svg: string;
+}
+
+export interface SavedReport {
+  id: string;
+  scan_id: number;
+  org_id: number;
+  org_name?: string;
+  title: string;
+  classification?: string;
+  created_at: string;
+  file_path?: string;
+  summary?: {
+    format?: string;
+    risk_score?: number;
+    total_findings?: number;
+    include_ai?: boolean;
+  };
+}
+
+export interface SavedAIReport {
+  id: string;
+  scan_id?: number | null;
+  org_id: number;
+  org_name?: string;
+  scan_name?: string;
+  mode: string;
+  scope_type: string;
+  title: string;
+  model_used?: string;
+  locale?: string;
+  prompt?: string;
+  content_md: string;
+  created_at: string;
+}
+
+export interface NatCheckResult {
+  egress_public_ip: string | null;
+  has_nat_loopback: boolean;
+  loopback_targets: string[];
+  details: Array<{
+    target: string;
+    host: string;
+    resolved_ips: string[];
+    is_nat_loopback: boolean;
+  }>;
+}
+
+export interface ProbeInstallerPackage {
+  agent_id: number;
+  agent_name: string;
+  platform: 'windows_msi' | 'linux_sh';
+  filename: string;
+  download_url: string;
+  local_download_path: string;
+  silent_command: string;
+  expires_in_seconds: number;
 }

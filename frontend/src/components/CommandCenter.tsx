@@ -101,12 +101,16 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
 
   const riskMeta = getRiskColor(riskScore);
 
-  // Engine source counts
+  // Engine source counts (supporting consolidated multi-engine tags like "zap+nuclei")
+  const hasEngine = (src: string | undefined, key: string) =>
+    String(src || '').toLowerCase().split('+').includes(key.toLowerCase());
+
   const engineCounts = {
-    nmap: filteredFindings.filter((f) => f.source_engine === 'nmap').length,
-    nuclei: filteredFindings.filter((f) => f.source_engine === 'nuclei').length,
-    native_web: filteredFindings.filter((f) => f.source_engine === 'native_web').length,
-    native_net: filteredFindings.filter((f) => f.source_engine === 'native_net').length,
+    nmap: filteredFindings.filter((f) => hasEngine(f.source_engine, 'nmap')).length,
+    nuclei: filteredFindings.filter((f) => hasEngine(f.source_engine, 'nuclei')).length,
+    zap: filteredFindings.filter((f) => hasEngine(f.source_engine, 'zap')).length,
+    native_web: filteredFindings.filter((f) => hasEngine(f.source_engine, 'native_web')).length,
+    native_net: filteredFindings.filter((f) => hasEngine(f.source_engine, 'native_net')).length,
   };
 
   const topCriticalFindings = [...filteredFindings]
@@ -328,6 +332,13 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
               >
                 <div className="text-[10px] text-theme-muted">Nuclei</div>
                 <div className="text-base font-bold text-theme-primary tabular-nums mt-0.5">{engineCounts.nuclei}</div>
+              </div>
+              <div
+                onClick={() => handleDrillDown({ tab: 'findings', severity: 'all', engine: 'zap' })}
+                className="p-2.5 rounded bg-subtle border border-theme hover:border-theme-accent cursor-pointer transition"
+              >
+                <div className="text-[10px] text-theme-muted">OWASP ZAP</div>
+                <div className="text-base font-bold text-theme-primary tabular-nums mt-0.5">{engineCounts.zap}</div>
               </div>
               <div
                 onClick={() => handleDrillDown({ tab: 'findings', severity: 'all', engine: 'native_web' })}

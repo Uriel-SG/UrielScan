@@ -1,14 +1,14 @@
-import React from 'react';
-import { 
-  LayoutDashboard, 
-  Crosshair, 
-  Radar, 
-  Sparkles, 
-  FileText, 
-  Clock, 
-  Settings, 
-  ShieldCheck, 
-  Server
+import React, { useState } from 'react';
+import {
+  LayoutDashboard,
+  Crosshair,
+  Radar,
+  Sparkles,
+  FileText,
+  Clock,
+  Settings,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 import { useI18n } from '../i18n/LanguageContext';
 
@@ -33,6 +33,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
   runningScansCount,
 }) => {
   const { L } = useI18n();
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('uriel_sidebar_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('uriel_sidebar_collapsed', next ? '1' : '0');
+      } catch {
+        // ignore storage restrictions
+      }
+      return next;
+    });
+  };
 
   const navItems = [
     {
@@ -88,12 +107,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   return (
-    <aside className="w-60 shrink-0 bg-panel border-r border-theme min-h-[calc(100vh-3.5rem)] flex flex-col justify-between p-3 select-none">
+    <aside
+      className={`${
+        collapsed ? 'w-16 px-2' : 'w-60 p-3'
+      } shrink-0 bg-panel border-r border-theme h-full overflow-hidden flex flex-col justify-between py-3 select-none transition-all duration-200`}
+    >
       {/* Navigation list */}
-      <div className="space-y-1">
-        <div className="px-2.5 py-1.5 text-[10px] font-mono font-bold tracking-wider uppercase text-theme-muted">
-          {L('Operational Navigation', 'Navigazione Operativa')}
-        </div>
+      <div className="space-y-1 flex-1 min-h-0 overflow-y-auto">
+        {!collapsed && (
+          <div className="px-2.5 py-1.5 text-[10px] font-mono font-bold tracking-wider uppercase text-theme-muted">
+            {L('Operational Navigation', 'Navigazione Operativa')}
+          </div>
+        )}
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentView === item.id;
@@ -101,13 +126,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <button
               key={item.id}
               onClick={() => onNavigate(item.id)}
-              className={`w-full flex items-center justify-between px-2.5 py-2 rounded transition text-left cursor-pointer ${
+              title={collapsed ? `${item.label} — ${item.sublabel}` : undefined}
+              className={`relative w-full flex items-center ${
+                collapsed ? 'justify-center px-0 py-2' : 'justify-between px-2.5 py-2 text-left'
+              } rounded transition cursor-pointer ${
                 isActive
-                  ? 'bg-subtle border-l-2 border-theme-accent text-theme-primary'
+                  ? collapsed
+                    ? 'bg-subtle border border-theme-accent text-theme-primary'
+                    : 'bg-subtle border-l-2 border-theme-accent text-theme-primary'
                   : 'text-theme-secondary hover:text-theme-primary hover:bg-subtle'
               }`}
             >
-              <div className="flex items-center space-x-2.5 truncate">
+              <div className={`flex items-center ${collapsed ? '' : 'space-x-2.5 truncate'}`}>
                 <div
                   className={`p-1 rounded shrink-0 transition ${
                     isActive ? 'text-theme-accent' : 'text-theme-muted'
@@ -115,17 +145,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 >
                   <Icon className="w-4 h-4" />
                 </div>
-                <div className="truncate">
-                  <div className={`text-xs font-semibold ${isActive ? 'text-theme-primary font-bold' : 'text-theme-secondary'}`}>
-                    {item.label}
+                {!collapsed && (
+                  <div className="truncate">
+                    <div className={`text-xs font-semibold ${isActive ? 'text-theme-primary font-bold' : 'text-theme-secondary'}`}>
+                      {item.label}
+                    </div>
+                    <div className="text-[10px] text-theme-muted truncate">
+                      {item.sublabel}
+                    </div>
                   </div>
-                  <div className="text-[10px] text-theme-muted truncate">
-                    {item.sublabel}
-                  </div>
-                </div>
+                )}
               </div>
 
-              {item.badge && (
+              {collapsed && item.id === 'scans' && runningScansCount > 0 && (
+                <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              )}
+
+              {!collapsed && item.badge && (
                 <span
                   className={`text-[9px] font-mono font-bold px-1 py-0.2 rounded border uppercase tracking-wider ${
                     item.badgeColor || 'border-theme-subtle bg-subtle text-theme-muted'
@@ -139,28 +175,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })}
       </div>
 
-      {/* Purple Core status widget */}
-      <div className="p-3 rounded border border-theme bg-subtle space-y-1.5">
-        <div className="flex items-center justify-between text-xs">
-          <span className="flex items-center space-x-1.5 text-theme-primary font-semibold">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-            <span>Purple Core</span>
-          </span>
-          <span className="text-[9px] font-mono text-emerald-500 font-bold">
-            ONLINE
-          </span>
+      {/* Collapse / Expand Sidebar Toggle */}
+      <button
+        type="button"
+        onClick={toggleCollapsed}
+        title={collapsed ? L('Expand Sidebar', 'Espandi Barra') : L('Collapse Sidebar', 'Comprimi Barra')}
+        className={`shrink-0 mt-2 w-full flex items-center ${
+          collapsed ? 'justify-center px-0 py-2' : 'justify-between px-2.5 py-2'
+        } rounded border border-theme bg-subtle hover:bg-hover text-theme-secondary hover:text-theme-primary transition cursor-pointer`}
+      >
+        <div className={`flex items-center ${collapsed ? '' : 'space-x-2'}`}>
+          {collapsed ? (
+            <PanelLeftOpen className="w-4 h-4 text-theme-accent shrink-0" />
+          ) : (
+            <PanelLeftClose className="w-4 h-4 text-theme-accent shrink-0" />
+          )}
+          {!collapsed && (
+            <span className="text-xs font-semibold">
+              {L('Collapse Sidebar', 'Comprimi Barra')}
+            </span>
+          )}
         </div>
-        <p className="text-[10px] text-theme-muted leading-tight">
-          {L('Correlation of offensive vectors and Blue Team remediation.', 'Correlazione vettori offensivi e contromisure Blue Team.')}
-        </p>
-        <div className="pt-1.5 border-t border-theme-subtle flex items-center justify-between text-[10px] font-mono text-theme-muted">
-          <span>UrielScan MSSP</span>
-          <span className="flex items-center space-x-1 text-theme-accent">
-            <Server className="w-2.5 h-2.5" />
-            <span>FastAPI:8000</span>
-          </span>
-        </div>
-      </div>
+      </button>
     </aside>
   );
 };

@@ -3,6 +3,10 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    font-size: 110%;
+  }
+
   :root, [data-theme="uriel-ops"] {
     --bg-canvas: #111418;
     --bg-panel: #171c22;
@@ -180,7 +184,7 @@
   border: 1px solid var(--input-border);
   color: var(--text-primary);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   transition: border-color 0.15s ease;
 }
 .input-industrial:focus {
@@ -225,7 +229,7 @@
 .table-industrial th {
   background-color: var(--bg-subtle);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;

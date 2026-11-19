@@ -821,4 +821,389 @@ def test_security_audit_regressions():
     assert raw_client.get("/api/auth/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
 
 
+def test_zap_engine_and_cross_engine_deduplication():
+    from backend.scanners.zap_engine import parse_zap_alerts, parse_zap_xml
+    from backend.scanners.deduplicator import consolidate_findings
+
+    # 1. /api/system/status exposes zap engine metadata
+    status_data = raw_client.get("/api/system/status").json()
+    assert "zap" in status_data["engines"]
+
+    # 2. Parse ZAP API alerts & XML quickout cleanly
+    api_alerts = parse_zap_alerts([
+        {
+            "alert": "SQL Injection",
+            "riskcode": "3",
+            "confidence": "3",
+            "url": "https://app.example.com:443/login",
+            "param": "user",
+            "cweid": "89",
+            "description": "<p>Possible SQL injection</p>",
+            "solution": "<p>Use prepared statements</p>",
+            "evidence": "SQL syntax error",
+        }
+    ])
+    assert len(api_alerts) == 1
+    assert api_alerts[0]["severity"] == "critical"
+    assert api_alerts[0]["cwe_id"] == "CWE-89"
+    assert api_alerts[0]["source_engine"] == "zap"
+    assert "<p>" not in api_alerts[0]["description"]
+
+    sample_xml = """<?xml version="1.0"?>
+    <OWASPZAPReport>
+      <site name="https://app.example.com" host="app.example.com" port="443">
+        <alerts>
+          <alertitem>
+            <alert>Strict-Transport-Security Header Not Set</alert>
+            <riskcode>1</riskcode>
+            <confidence>2</confidence>
+            <cweid>319</cweid>
+            <desc>&lt;p&gt;HSTS header missing&lt;/p&gt;</desc>
+            <solution>&lt;p&gt;Enable HSTS&lt;/p&gt;</solution>
+            <instances><instance><uri>https://app.example.com/</uri><evidence>No HSTS</evidence></instance></instances>
+          </alertitem>
+        </alerts>
+      </site>
+    </OWASPZAPReport>"""
+    xml_findings = parse_zap_xml(sample_xml)
+    assert len(xml_findings) == 1
+    assert xml_findings[0]["host"] == "app.example.com"
+    assert xml_findings[0]["port"] == 443
+
+    # 3. Cross-engine deduplication (ZAP + Nuclei + Nmap + Native Web) + Severity Ordering
+    raw_findings = [
+        {
+            "host": "app.example.com", "port": 443, "severity": "info", "cvss": 0.0,
+            "title": "Apache HTTP Server Exposed", "source_engine": "nmap", "evidence": "Apache/2.4.49"
+        },
+        {
+            "host": "https://app.example.com:443", "port": 443, "severity": "low", "cvss": 3.1,
+            "title": "Header Strict-Transport-Security (HSTS) Assente", "source_engine": "native_web", "evidence": "Missing HSTS header"
+        },
+        *xml_findings,  # ZAP also detected HSTS missing
+        {
+            "host": "app.example.com", "port": 443, "severity": "high", "cvss": 7.5,
+            "cve_ids": "CVE-2021-41773", "title": "Apache Path Traversal CVE-2021-41773",
+            "source_engine": "nuclei", "evidence": "GET /cgi-bin/.%2e/etc/passwd"
+        },
+        {
+            "host": "app.example.com", "port": 443, "severity": "critical", "cvss": 9.8,
+            "cve_ids": "CVE-2021-41773", "title": "http-vuln-cve2021-41773",
+            "source_engine": "nmap", "evidence": "Nmap NSE vulnerable"
+        },
+        *api_alerts,  # ZAP SQLi critical
+        {
+            "host": "app.example.com", "port": 443, "severity": "high", "cvss": 8.0,
+            "title": "SQL Injection Probe Detected", "cwe_id": "CWE-89",
+            "source_engine": "native_web", "evidence": "Error near syntax"
+        },
+    ]
+
+    consolidated = consolidate_findings(raw_findings)
+    # 7 inputs -> 4 canonical findings (SQLi merged, CVE-2021-41773 merged, HSTS merged, Banner info)
+    assert len(consolidated) == 4
+    sevs = [f["severity"] for f in consolidated]
+    assert sevs == ["critical", "critical", "low", "info"]
+
+    sqli = next(f for f in consolidated if f.get("cwe_id") == "CWE-89")
+    assert sqli["source_engine"] == "zap+native_web"
+    assert "[ZAP]" in sqli["evidence"] and "[NATIVE_WEB]" in sqli["evidence"]
+
+    hsts = next(f for f in consolidated if "Strict-Transport-Security" in f["title"])
+    assert hsts["source_engine"] == "zap+native_web"
+
+    cve = next(f for f in consolidated if "CVE-2021-41773" in f.get("cve_ids", ""))
+    assert cve["source_engine"] == "nuclei+nmap"
+    assert cve["severity"] == "critical"
+
+
+def test_reports_logo_and_severity_ordering():
+    from backend.export_engine import (
+        export_scan_results_csv,
+        export_scan_results_txt,
+        generate_pdf_document,
+        generate_docx_report,
+    )
+    import zipfile, io, xml.etree.ElementTree as ET
+
+    shuffled_findings = [
+        {"id": 1, "org_id": 1, "scan_id": 1, "host": "10.0.0.5", "port": 80, "severity": "info", "cvss": 0.0, "title": "ITEM_INFO", "source_engine": "native_net"},
+        {"id": 2, "org_id": 1, "scan_id": 1, "host": "10.0.0.5", "port": 443, "severity": "medium", "cvss": 5.3, "title": "ITEM_MEDIUM", "source_engine": "zap"},
+        {"id": 3, "org_id": 1, "scan_id": 1, "host": "10.0.0.5", "port": 8080, "severity": "critical", "cvss": 9.8, "title": "ITEM_CRITICAL", "source_engine": "nuclei"},
+        {"id": 4, "org_id": 1, "scan_id": 1, "host": "10.0.0.5", "port": 22, "severity": "low", "cvss": 3.1, "title": "ITEM_LOW", "source_engine": "nmap"},
+        {"id": 5, "org_id": 1, "scan_id": 1, "host": "10.0.0.5", "port": 445, "severity": "high", "cvss": 7.8, "title": "ITEM_HIGH", "source_engine": "nmap"},
+    ]
+    scans_meta = [{"id": 1, "org_id": 1, "name": "Order Test"}]
+    org_map = {1: {"name": "Test Org"}}
+
+    def assert_order(txt: str):
+        positions = [txt.index(tag) for tag in ("ITEM_CRITICAL", "ITEM_HIGH", "ITEM_MEDIUM", "ITEM_LOW", "ITEM_INFO")]
+        assert positions == sorted(positions), f"Incorrect severity order: {positions}"
+
+    csv_txt = export_scan_results_csv(scans_meta, shuffled_findings, org_map).decode("utf-8")
+    assert_order(csv_txt)
+
+    txt_out = export_scan_results_txt("Order Test", "10.0.0.5", [], shuffled_findings, org_map).decode("utf-8")
+    assert_order(txt_out)
+
+    pdf_bytes = generate_pdf_document(
+        report_title="Order PDF", classification="CONFIDENTIAL", mssp_profile={"company_name": "Uriel"},
+        client_org={"name": "Test Org"}, targets="10.0.0.5", hosts=[], findings=shuffled_findings, include_ai=False
+    )
+    assert pdf_bytes.startswith(b"%PDF") and len(pdf_bytes) > 1500
+
+    docx_bytes = generate_docx_report(
+        report_title="Order DOCX", classification="CONFIDENTIAL", mssp_profile={"company_name": "Uriel"},
+        client_org={"name": "Test Org"}, targets="10.0.0.5", hosts=[], findings=shuffled_findings, include_ai=False
+    )
+    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
+        names = zf.namelist()
+        assert "word/media/urielscan_logo.png" in names
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "rIdLogo" in doc_xml
+        assert_order(doc_xml)
+        ET.fromstring(doc_xml.encode("utf-8"))  # Valid XML namespaces & structure
+
+    # When organization HAS a custom PNG logo, PDF/DOCX must use org_logo and NOT UrielScan logo
+    import base64 as _b64
+    from backend.database import get_db_connection
+    tiny_png_b64 = "data:image/png;base64," + _b64.b64encode(
+        _b64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    ).decode("ascii")
+    org_pdf = generate_pdf_document(
+        report_title="Org PDF", classification="CONFIDENTIAL", mssp_profile={"company_name": "Uriel"},
+        client_org={"name": "Custom Logo Org", "logo_data": tiny_png_b64}, targets="10.0.0.5", hosts=[], findings=shuffled_findings, include_ai=False
+    )
+    assert org_pdf.startswith(b"%PDF")
+    org_docx = generate_docx_report(
+        report_title="Org DOCX", classification="CONFIDENTIAL", mssp_profile={"company_name": "Uriel"},
+        client_org={"name": "Custom Logo Org", "logo_data": tiny_png_b64}, targets="10.0.0.5", hosts=[], findings=shuffled_findings, include_ai=False
+    )
+    with zipfile.ZipFile(io.BytesIO(org_docx)) as zf:
+        org_names = zf.namelist()
+        assert "word/media/org_logo.png" in org_names
+        assert "word/media/urielscan_logo.png" not in org_names
+        ET.fromstring(zf.read("word/document.xml"))
+
+    # HTML report via API: uses Org logo when present, falls back to UrielScan PNG ONLY when org has no logo
+    scans = client.get("/api/scans").json()
+    rep_with_org_logo = client.post("/api/reports/generate", json={"scan_id": scans[0]["id"], "title": "Org Logo Check"}).json()
+    html_org = client.get(f"/api/reports/{rep_with_org_logo['id']}/view").text
+    assert 'alt="UrielScan"' not in html_org
+    client.delete(f"/api/reports/{rep_with_org_logo['id']}")
+
+    no_logo_org = client.post("/api/organizations", json={"name": "NoLogo Corp", "industry": "Tech", "target_scope": "10.0.0.1"}).json()
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO scans (org_id, name, targets, scan_profile, engines_json, status, progress, started_at) VALUES (?, ?, ?, ?, ?, 'completed', 100, '2026-11-19T00:00:00Z');",
+            (no_logo_org["id"], "NoLogo Scan", "10.0.0.1", "standard", '["native"]'),
+        )
+        nologo_scan_id = cur.lastrowid
+    conn.close()
+    rep_fallback = client.post("/api/reports/generate", json={"scan_id": nologo_scan_id, "title": "Fallback Logo Check"}).json()
+    html_fallback = client.get(f"/api/reports/{rep_fallback['id']}/view").text
+    assert "data:image/png;base64," in html_fallback
+    assert 'alt="UrielScan"' in html_fallback
+    client.delete(f"/api/reports/{rep_fallback['id']}")
+    client.delete(f"/api/scans/{nologo_scan_id}")
+    client.delete(f"/api/organizations/{no_logo_org['id']}")
+
+
+def test_saved_pdf_docx_reports_and_ai_reports_crud():
+    scans = client.get("/api/scans").json()
+    assert len(scans) >= 1
+    sid = scans[0]["id"]
+
+    # 1. AI analysis persists saved report in ai_reports table
+    ai_resp = client.post("/api/ai/analyze", json={"scan_id": sid, "mode": "purple", "lang": "en"})
+    assert ai_resp.status_code == 200
+    ai_json = ai_resp.json()
+    saved_ai = ai_json.get("saved_report")
+    assert saved_ai and saved_ai["id"].startswith("AIRPT-")
+
+    ai_list = client.get("/api/ai/reports").json()
+    assert any(r["id"] == saved_ai["id"] for r in ai_list)
+
+    del_ai = client.delete(f"/api/ai/reports/{saved_ai['id']}")
+    assert del_ai.status_code == 200
+    assert not any(r["id"] == saved_ai["id"] for r in client.get("/api/ai/reports").json())
+
+    # 2. Exported PDF and DOCX reports persist into reports archive with proper MIME types
+    created_ids = []
+    for fmt, expected_mime in [
+        ("pdf", "application/pdf"),
+        ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ]:
+        exp_resp = client.post("/api/reports/export", json={
+            "scan_id": sid,
+            "format": fmt,
+            "report_title": f"Saved {fmt.upper()} Check",
+            "classification": "CONFIDENTIAL",
+            "executive_notes": "Verification test",
+            "include_ai": False,
+            "include_evidence": False,
+            "include_host_topology": False,
+            "lang": "en",
+        })
+        assert exp_resp.status_code == 200
+        rid = exp_resp.headers.get("X-Report-Id")
+        assert rid and rid.startswith("RPT-")
+        created_ids.append(rid)
+
+        rep_list = client.get("/api/reports").json()
+        matched = next((r for r in rep_list if r["id"] == rid), None)
+        assert matched is not None
+        assert matched["summary"]["format"] == fmt
+
+        view_resp = client.get(f"/api/reports/{rid}/view")
+        assert view_resp.status_code == 200
+        assert expected_mime in view_resp.headers.get("content-type", "")
+
+        dl_resp = client.get(f"/api/reports/{rid}/download")
+        assert dl_resp.status_code == 200
+        assert expected_mime in dl_resp.headers.get("content-type", "")
+
+    for rid in created_ids:
+        assert client.delete(f"/api/reports/{rid}").status_code == 200
+
+
+def test_nat_loopback_guard(monkeypatch):
+    from backend.scanners import nat_guard
+
+    monkeypatch.setattr(nat_guard, "get_egress_public_ip", lambda *a, **kw: "198.51.100.42")
+
+    check_hit = client.get("/api/network/nat-check?targets=198.51.100.42,10.0.0.10").json()
+    assert check_hit["egress_public_ip"] == "198.51.100.42"
+    assert check_hit["has_nat_loopback"] is True
+    assert "198.51.100.42" in check_hit["loopback_targets"]
+
+    check_miss = client.get("/api/network/nat-check?targets=10.0.0.10").json()
+    assert check_miss["has_nat_loopback"] is False
+
+    # Hairpin false-positive suppression against external WAN InternetDB truth ([443] only)
+    hosts = [
+        {
+            "ip": "198.51.100.42",
+            "hostname": "198.51.100.42",
+            "ports": [
+                {"port": 53, "protocol": "tcp", "state": "open", "service": "domain"},
+                {"port": 80, "protocol": "tcp", "state": "open", "service": "http"},
+                {"port": 443, "protocol": "tcp", "state": "open", "service": "https"},
+                {"port": 8080, "protocol": "tcp", "state": "open", "service": "http-proxy"},
+            ],
+        }
+    ]
+    raw_findings = [
+        {"host": "198.51.100.42", "port": 53, "severity": "medium", "title": "Router Internal DNS Exposed"},
+        {"host": "198.51.100.42", "port": 80, "severity": "high", "title": "Router LAN HTTP Admin Panel"},
+        {"host": "198.51.100.42", "port": 8080, "severity": "medium", "title": "Router Proxy Hairpin"},
+        {"host": "198.51.100.42", "port": 443, "severity": "medium", "title": "Real Public HTTPS Service"},
+    ]
+    filtered_hosts, filtered_findings, stats = nat_guard.filter_loopback_artifacts(
+        loopback_details=check_hit["details"],
+        all_hosts=hosts,
+        all_findings=raw_findings,
+        wan_info={"ok": True, "ip": "198.51.100.42", "ports": [443], "vulns": []},
+        egress_ip="198.51.100.42",
+        locale="en",
+    )
+    assert stats["suppressed_ports"] == 3
+    assert stats["suppressed_findings"] == 3
+    assert [p["port"] for p in filtered_hosts[0]["ports"]] == [443]
+    titles = [f["title"] for f in filtered_findings]
+    assert "Real Public HTTPS Service" in titles
+    assert "Router LAN HTTP Admin Panel" not in titles
+    assert any(f.get("source_engine") == "nat_guard" for f in filtered_findings)
+
+
+def test_probe_self_contained_installers():
+    import base64, json, re
+
+    orgs = client.get("/api/organizations").json()
+    org_id = orgs[0]["id"]
+    created = client.post("/api/agents", json={"org_id": org_id, "name": "Edge Installer Probe"}).json()
+    aid = created["id"]
+    token = created["token"]
+
+    try:
+        # 1. Windows self-contained .msi
+        msi_resp = client.post(
+            f"/api/agents/{aid}/installer",
+            json={
+                "platform": "windows_msi",
+                "server_url": "https://uriel.example.test:8443",
+                "token": token,
+            },
+        )
+        assert msi_resp.status_code == 200
+        msi_bytes = msi_resp.content
+        assert msi_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"), "Invalid OLE2 MSI header"
+        s_idx = msi_bytes.index(b"URIELSCAN_PROBE_CFG_START:") + len(b"URIELSCAN_PROBE_CFG_START:")
+        e_idx = msi_bytes.index(b":URIELSCAN_PROBE_CFG_END", s_idx)
+        embedded_cfg = json.loads(msi_bytes[s_idx:e_idx].decode("utf-8").strip())
+        assert embedded_cfg["token"] == token
+        assert embedded_cfg["server_url"] == "https://uriel.example.test:8443"
+
+        # 2. Linux self-contained .sh (also testing token rotation when token omitted)
+        sh_resp = client.post(
+            f"/api/agents/{aid}/installer",
+            json={
+                "platform": "linux_sh",
+                "server_url": "https://uriel.example.test:8443",
+            },
+        )
+        assert sh_resp.status_code == 200
+        sh_text = sh_resp.content.decode("utf-8")
+        assert sh_text.startswith("#!/usr/bin/env bash")
+        assert "python-build-standalone" in sh_text
+        m = re.search(r"probe_config\.json.*?\n([A-Za-z0-9+/=\n]+)\n__URIEL_PROBE_CFG__", sh_text, re.DOTALL)
+        assert m is not None
+        decoded_cfg = json.loads(base64.b64decode(m.group(1).strip()).decode("utf-8"))
+        assert decoded_cfg["server_url"] == "https://uriel.example.test:8443"
+        assert decoded_cfg["token"] and decoded_cfg["token"] != token  # rotated freshly
+
+        # 3. Signed direct installer URL + Silent RMM PowerShell / Bash commands
+        win_link = client.post(
+            f"/api/agents/{aid}/installer-link",
+            json={
+                "platform": "windows_msi",
+                "server_url": "https://uriel.example.test:8443",
+                "insecure": True,
+            },
+        ).json()
+        assert win_link["filename"].endswith(".msi")
+        assert win_link["download_url"].startswith("https://uriel.example.test:8443/api/agent/installer/")
+        assert "/qn /norestart" in win_link["silent_command"]
+        assert "ServerCertificateValidationCallback" in win_link["silent_command"]
+
+        # Unauthenticated target fetch via signed ticket works without admin Bearer header
+        dl_win = raw_client.get(win_link["local_download_path"])
+        assert dl_win.status_code == 200
+        assert dl_win.content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+
+        lin_link = client.post(
+            f"/api/agents/{aid}/installer-link",
+            json={
+                "platform": "linux_sh",
+                "server_url": "https://uriel.example.test:8443",
+                "insecure": False,
+            },
+        ).json()
+        assert lin_link["filename"].endswith(".sh")
+        assert "curl -fsSL " in lin_link["silent_command"]
+        assert "sudo bash" in lin_link["silent_command"]
+        dl_lin = raw_client.get(lin_link["local_download_path"])
+        assert dl_lin.status_code == 200
+        assert dl_lin.content.startswith(b"#!/usr/bin/env bash")
+    finally:
+        client.delete(f"/api/agents/{aid}")
+
+    # Revoking agent immediately invalidates direct installer tickets
+    assert raw_client.get(win_link["local_download_path"]).status_code == 404
+    assert raw_client.get(lin_link["local_download_path"]).status_code == 404
+
+
+
+
 

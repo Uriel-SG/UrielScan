@@ -9,11 +9,12 @@ import {
   Globe, 
   Lock, 
   Sparkles, 
-  Check, 
+  Check,
   Loader2,
-  Radio
+  Radio,
+  AlertTriangle
 } from 'lucide-react';
-import { Organization, NSEScript, Scan, RemoteAgent } from '../types';
+import { Organization, NSEScript, Scan, RemoteAgent, NatCheckResult } from '../types';
 import { api } from '../services/api';
 import { useToast } from './UIFeedback';
 import { useI18n } from '../i18n/LanguageContext';
@@ -45,8 +46,8 @@ const getProfiles = (L: (en: string, it: string) => string): ProfileTemplate[] =
   {
     id: 'full-purple',
     name: L('Full Purple Assessment (Network + Web)', 'Full Purple Assessment (Rete + Web)'),
-    description: L('Complete offensive/defensive assessment: Nmap NSE, Nuclei OWASP templates, and Native Engine across network and web.', 'Valutazione completa offensiva/difensiva: Nmap NSE, Nuclei OWASP templates e Native Engine su rete e web.'),
-    engines: ['nmap', 'native_web', 'native_net', 'nuclei'],
+    description: L('Complete offensive/defensive assessment: Nmap NSE, Nuclei OWASP templates, OWASP ZAP, and Native Engine across network and web.', 'Valutazione completa offensiva/difensiva: Nmap NSE, Nuclei, OWASP ZAP e Native Engine su rete e web.'),
+    engines: ['nmap', 'native_web', 'native_net', 'nuclei', 'zap'],
     ports: 'top-1000',
     nmapFlags: { '-sV': true, '-sC': true, '-O': true, '-Pn': true, '-T4': true, '-sS': true },
     nseScripts: ['ssl-enum-ciphers', 'http-headers', 'ssl-cert', 'http-title', 'ssh2-enum-algos', 'banner'],
@@ -81,8 +82,8 @@ const getProfiles = (L: (en: string, it: string) => string): ProfileTemplate[] =
   {
     id: 'web-owasp',
     name: L('Web Application & OWASP Audit', 'Web Application & OWASP Audit'),
-    description: L('Audit focused on HTTP/HTTPS applications, security headers, sensitive files, and Nuclei templates.', 'Audit incentrato su applicazioni HTTP/HTTPS, security headers, file sensibili e Nuclei templates.'),
-    engines: ['native_web', 'nuclei'],
+    description: L('Audit focused on HTTP/HTTPS applications, security headers, sensitive files, OWASP ZAP, and Nuclei templates.', 'Audit incentrato su applicazioni HTTP/HTTPS, security headers, file sensibili, OWASP ZAP e Nuclei templates.'),
+    engines: ['native_web', 'nuclei', 'zap'],
     ports: '80,443,8080,8443',
     nmapFlags: { '-sV': true, '-sC': false, '-O': false, '-Pn': true, '-T4': true, '-sS': false },
     nseScripts: ['http-headers', 'http-title', 'http-enum'],
@@ -126,6 +127,27 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [scanName, setScanName] = useState<string>(() => L('Purple Assessment - Corporate Perimeter', 'Purple Assessment - Perimetro Aziendale'));
   const [targets, setTargets] = useState<string>(initialOrg?.target_scope || '192.168.1.0/24');
   const [isSavingScope, setIsSavingScope] = useState<boolean>(false);
+  const [natCheck, setNatCheck] = useState<NatCheckResult | null>(null);
+
+  useEffect(() => {
+    const trimmed = targets.trim();
+    if (!trimmed || trimmed.length < 3 || selectedAgentId) {
+      setNatCheck(null);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      api.checkNatLoopback(trimmed).then((res) => {
+        if (active) setNatCheck(res);
+      }).catch(() => {
+        if (active) setNatCheck(null);
+      });
+    }, 500);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [targets, selectedAgentId]);
 
   useEffect(() => {
     api.getAgents().then((data) => {
@@ -250,9 +272,11 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [engines, setEngines] = useState<{ [k: string]: boolean }>({
     nmap: true,
     nuclei: true,
+    zap: true,
     native_web: true,
     native_net: true,
   });
+  const [zapMode, setZapMode] = useState<'baseline' | 'full'>('baseline');
 
   const [portSelection, setPortSelection] = useState<string>('top-1000');
   const [customPorts, setCustomPorts] = useState<string>('22,80,443,3389,8080');
@@ -296,6 +320,7 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
     const newEngines: { [k: string]: boolean } = {
       nmap: prof.engines.includes('nmap'),
       nuclei: prof.engines.includes('nuclei'),
+      zap: prof.engines.includes('zap'),
       native_web: prof.engines.includes('native_web'),
       native_net: prof.engines.includes('native_net'),
     };
@@ -416,12 +441,14 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
         nuclei_tags: nucleiTags,
         nuclei_severities: nucleiSeverity,
         web_checks: webChecks,
+        zap_mode: zapMode,
       },
       nmap_args: liveNmapCommand,
       nse_scripts: selectedNseScripts,
       nuclei_tags: nucleiTags,
       nuclei_severity: nucleiSeverity,
       web_checks: webChecks,
+      zap_mode: zapMode,
     };
 
     try {
@@ -436,39 +463,46 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header bar */}
-      <div className="card-industrial p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center space-x-2 text-[11px] uppercase font-bold tracking-wider text-theme-accent">
-            <Crosshair className="w-3.5 h-3.5" />
-            <span>{L('Purple Team & ZenMap++ Studio Configurator', 'Configuratore Purple Team & ZenMap++ Studio')}</span>
-          </div>
-          <h1 className="text-base font-bold text-theme-primary mt-0.5 tracking-tight">
-            {L('New Hybrid Security Scan', 'Nuova Scansione Ibrida di Sicurezza')}
-          </h1>
-          <p className="text-xs text-theme-secondary mt-0.5">
-            {L('Orchestrate Nmap with NSE scripts, native async probes and Nuclei templates in a single analysis cycle.', 'Orchestra Nmap con script NSE, probe asincrone native e template Nuclei in un unico ciclo di analisi.')}
-          </p>
-        </div>
+    <div className="h-full flex flex-col">
+      {/* Fixed Header bar (non-scrolling) */}
+      <div className="shrink-0 px-4 lg:px-6 pt-4 lg:pt-6 pb-4 bg-canvas">
+        <div className="max-w-7xl mx-auto">
+          <div className="card-industrial p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center space-x-2 text-[11px] uppercase font-bold tracking-wider text-theme-accent">
+                <Crosshair className="w-3.5 h-3.5" />
+                <span>{L('Purple Team & ZenMap++ Studio Configurator', 'Configuratore Purple Team & ZenMap++ Studio')}</span>
+              </div>
+              <h1 className="text-base font-bold text-theme-primary mt-0.5 tracking-tight">
+                {L('New Hybrid Security Scan', 'Nuova Scansione Ibrida di Sicurezza')}
+              </h1>
+              <p className="text-xs text-theme-secondary mt-0.5">
+                {L('Orchestrate Nmap with NSE scripts, native async probes and Nuclei templates in a single analysis cycle.', 'Orchestra Nmap con script NSE, probe asincrone native e template Nuclei in un unico ciclo di analisi.')}
+              </p>
+            </div>
 
-        <div>
-          <button
-            onClick={handleLaunchScan}
-            disabled={isSubmitting}
-            className="btn-primary flex items-center space-x-2 px-4 py-2 text-xs font-semibold shadow-sm disabled:opacity-50"
-          >
-            {isSubmitting ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Play className="w-3.5 h-3.5 fill-current" />
-            )}
-            <span>{isSubmitting ? L('Initializing...', 'Inizializzazione...') : L('Launch Real Scan', 'Avvia Scansione Reale')}</span>
-          </button>
+            <div>
+              <button
+                onClick={handleLaunchScan}
+                disabled={isSubmitting}
+                className="btn-primary flex items-center space-x-2 px-4 py-2 text-xs font-semibold shadow-sm disabled:opacity-50"
+              >
+                {isSubmitting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                )}
+                <span>{isSubmitting ? L('Initializing...', 'Inizializzazione...') : L('Launch Scan', 'Avvia Scansione')}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Target & Scope */}
+      {/* Scrollable Configuration Sections */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 lg:px-6 pb-16">
+        <div className="max-w-7xl mx-auto space-y-4">
+          {/* Target & Scope */}
       <div className="card-industrial p-4 space-y-3">
         <h2 className="text-xs font-bold uppercase tracking-wider text-theme-secondary flex items-center space-x-2">
           <Globe className="w-3.5 h-3.5 text-theme-accent" />
@@ -595,6 +629,26 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
             />
           </div>
         </div>
+
+        {natCheck?.has_nat_loopback && !selectedAgentId && (
+          <div className="p-3 rounded border border-amber-500/60 bg-amber-950/20 flex items-start space-x-2.5 text-xs">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1 text-theme-secondary">
+              <div className="font-bold text-amber-300">
+                {L(
+                  `NAT Loopback / Hairpinning Detected (${natCheck.egress_public_ip})`,
+                  `NAT Loopback / Hairpinning Rilevato (${natCheck.egress_public_ip})`
+                )}
+              </div>
+              <p className="leading-snug text-[11px]">
+                {L(
+                  'Target resolves to your own public WAN egress IP. Scanning from inside the LAN normally hits internal router management ports causing false positives. UrielScan NAT Guard will automatically verify true external WAN exposure via Shodan InternetDB and suppress router LAN hairpin findings. For active external testing, run the scan via an external Remote Probe.',
+                  'Il target corrisponde al tuo IP pubblico WAN di uscita. Scansionarlo dall\'interno della LAN colpisce il router locale causando falsi positivi. UrielScan NAT Guard verificherà automaticamente la reale esposizione WAN esterna via Shodan InternetDB sopprimendo i falsi positivi del router. Per un test attivo dall\'esterno usa una Sonda Remota esterna.'
+                )}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Profiles */}
@@ -649,10 +703,11 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
           <span>{L('3. Active Engine Selection', '3. Selezione Motori Operativi')}</span>
         </h2>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
           {[
             { id: 'nmap', label: 'Nmap 7.95 + NSE', desc: L('Port discovery, OS & script NSE', 'Port discovery, OS & script NSE') },
             { id: 'nuclei', label: 'Nuclei Engine', desc: L('Template matching CVE & misconfig', 'Template matching CVE & misconfig') },
+            { id: 'zap', label: 'OWASP ZAP', desc: L('Integrated web DAST (deduped w/ Nuclei)', 'Web DAST integrato (no duplicati con Nuclei)') },
             { id: 'native_web', label: 'Native Web OWASP', desc: L('Headers, cookies, secrets, CORS', 'Headers, cookies, secrets, CORS') },
             { id: 'native_net', label: 'Native Network/SSL', desc: L('TLS cipher, certificates & banner', 'Cipher TLS, certificati & banner') },
           ].map((item) => (
@@ -840,12 +895,12 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
         </div>
       )}
 
-      {/* Web & Nuclei */}
-      {(engines.native_web || engines.nuclei) && (
+      {/* Web, ZAP & Nuclei */}
+      {(engines.native_web || engines.nuclei || engines.zap) && (
         <div className="card-industrial p-4 space-y-3">
           <h2 className="text-xs font-bold uppercase tracking-wider text-theme-secondary flex items-center space-x-2">
             <Lock className="w-3.5 h-3.5 text-theme-accent" />
-            <span>{L('4. Web & Nuclei Audit Parameters', '4. Parametri Audit Web & Nuclei')}</span>
+            <span>{L('4. Web, OWASP ZAP & Nuclei Parameters', '4. Parametri Audit Web, OWASP ZAP & Nuclei')}</span>
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -914,9 +969,49 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
                 </div>
               </div>
             )}
+
+            {engines.zap && (
+              <div className="space-y-2 md:col-span-2 pt-2 border-t border-theme-subtle">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-semibold text-theme-secondary">
+                      {L('OWASP ZAP Scan Mode (Cross-Engine Deduplicated)', 'Modalità Scansione OWASP ZAP (Con Deduplicazione Integrata)')}
+                    </div>
+                    <div className="text-[11px] text-theme-muted">
+                      {L(
+                        'Duplicate alerts already found by Nuclei, Nmap NSE, or Native Web are automatically merged.',
+                        'Eventuali vulnerabilità già rilevate da Nuclei, Nmap NSE o Native Web vengono automaticamente unificate senza doppioni.'
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setZapMode('baseline')}
+                      className={`px-2.5 py-1 rounded text-xs font-mono border ${
+                        zapMode === 'baseline' ? 'border-theme-accent bg-subtle text-theme-primary font-semibold' : 'border-theme bg-panel text-theme-muted'
+                      }`}
+                    >
+                      {L('Spider Baseline (Safe)', 'Spider Baseline (Sicuro)')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setZapMode('full')}
+                      className={`px-2.5 py-1 rounded text-xs font-mono border ${
+                        zapMode === 'full' ? 'border-theme-accent bg-subtle text-theme-primary font-semibold' : 'border-theme bg-panel text-theme-muted'
+                      }`}
+                    >
+                      {L('Full Active Scan', 'Active Scan Completo')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
+        </div>
+      </div>
     </div>
   );
 };

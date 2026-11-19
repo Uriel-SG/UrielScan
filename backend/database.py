@@ -210,6 +210,22 @@ def init_db() -> None:
         FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE,
         FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS ai_reports (
+        id TEXT PRIMARY KEY,
+        scan_id INTEGER,
+        org_id INTEGER NOT NULL,
+        mode TEXT NOT NULL,
+        scope_type TEXT NOT NULL DEFAULT 'global',
+        title TEXT NOT NULL,
+        model_used TEXT DEFAULT 'local',
+        locale TEXT DEFAULT 'en',
+        prompt TEXT DEFAULT '',
+        content_md TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE SET NULL,
+        FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+    );
     """)
 
     conn.commit()
@@ -1085,4 +1101,117 @@ def update_agent_heartbeat(
             agent_id
         ))
     conn.close()
+
+
+def rotate_agent_token(agent_id: int) -> Optional[Dict[str, Any]]:
+    """Generate a fresh probe token for an existing agent so installers always embed a valid key."""
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    token_prefix = token[:8]
+
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute(
+            "UPDATE agents SET token_hash = ?, token_prefix = ? WHERE id = ?;",
+            (token_hash, token_prefix, agent_id),
+        )
+        updated = cur.rowcount > 0
+    conn.close()
+    if not updated:
+        return None
+    agent = get_agent_by_id(agent_id)
+    if agent:
+        agent["token"] = token
+    return agent
+
+
+# ==========================================
+# AI PURPLE ANALYST REPORTS HELPERS
+# ==========================================
+
+def create_ai_report(
+    report_id: str,
+    org_id: int,
+    mode: str,
+    scope_type: str,
+    title: str,
+    model_used: str,
+    locale: str,
+    prompt: str,
+    content_md: str,
+    scan_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    with conn:
+        conn.execute("""
+            INSERT INTO ai_reports (
+                id, scan_id, org_id, mode, scope_type, title, model_used, locale, prompt, content_md, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            report_id,
+            scan_id,
+            org_id,
+            mode,
+            scope_type or "global",
+            title,
+            model_used or "local",
+            locale or "en",
+            prompt or "",
+            content_md,
+            now_iso,
+        ))
+    conn.close()
+    return {
+        "id": report_id,
+        "scan_id": scan_id,
+        "org_id": org_id,
+        "mode": mode,
+        "scope_type": scope_type or "global",
+        "title": title,
+        "model_used": model_used or "local",
+        "locale": locale or "en",
+        "prompt": prompt or "",
+        "content_md": content_md,
+        "created_at": now_iso,
+    }
+
+
+def get_ai_reports(org_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    base_sql = """
+        SELECT ar.*, o.name AS org_name, s.name AS scan_name
+        FROM ai_reports ar
+        LEFT JOIN organizations o ON ar.org_id = o.id
+        LEFT JOIN scans s ON ar.scan_id = s.id
+    """
+    if org_id:
+        rows = conn.execute(base_sql + " WHERE ar.org_id = ? ORDER BY ar.created_at DESC;", (org_id,)).fetchall()
+    else:
+        rows = conn.execute(base_sql + " ORDER BY ar.created_at DESC;").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_ai_report_by_id(report_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    row = conn.execute("""
+        SELECT ar.*, o.name AS org_name, s.name AS scan_name
+        FROM ai_reports ar
+        LEFT JOIN organizations o ON ar.org_id = o.id
+        LEFT JOIN scans s ON ar.scan_id = s.id
+        WHERE ar.id = ?;
+    """, (report_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_ai_report(report_id: str) -> bool:
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute("DELETE FROM ai_reports WHERE id = ?;", (report_id,))
+        deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
 

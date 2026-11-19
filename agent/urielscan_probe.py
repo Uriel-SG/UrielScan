@@ -21,12 +21,22 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import certifi
+except ImportError:
+    certifi = None  # type: ignore
+
+CFG_MARKER_START = b"URIELSCAN_PROBE_CFG_START:"
+CFG_MARKER_END = b":URIELSCAN_PROBE_CFG_END"
 
 _SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9.\-:/\[\]]+$")
 _ALLOWED_NMAP_FLAGS = {
@@ -64,11 +74,18 @@ def now_time_str() -> str:
 
 
 class ProbeClient:
-    def __init__(self, server_url: str, token: str, insecure: bool = False):
+    def __init__(self, server_url: str, token: str, insecure: bool = False, ca_bundle: Optional[str] = None):
         self.server_url = server_url.rstrip("/")
         self.token = token
         self.insecure = insecure
-        self.ssl_context = ssl._create_unverified_context() if insecure else None
+        if insecure:
+            self.ssl_context: Optional[ssl.SSLContext] = ssl._create_unverified_context()
+        elif ca_bundle and os.path.exists(ca_bundle):
+            self.ssl_context = ssl.create_default_context(cafile=ca_bundle)
+        elif certifi is not None:
+            self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+        else:
+            self.ssl_context = None
 
     def request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None, timeout: float = 15.0) -> Dict[str, Any]:
         url = f"{self.server_url}{path}"
@@ -137,13 +154,23 @@ class ProbeClient:
         return self.request("POST", f"/api/agent/jobs/{scan_id}/results", payload=payload)
 
 
+def _find_zap_bin() -> Optional[str]:
+    for name in ("zap.bat", "zap.sh", "zaproxy", "zap"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return None
+
+
 def detect_local_engines() -> Dict[str, Any]:
     nmap_path = shutil.which("nmap")
     nuclei_path = shutil.which("nuclei")
+    zap_path = _find_zap_bin()
     return {
         "native": {"installed": True, "version": VERSION},
         "nmap": {"installed": bool(nmap_path), "path": nmap_path or ""},
-        "nuclei": {"installed": bool(nuclei_path), "path": nuclei_path or ""}
+        "nuclei": {"installed": bool(nuclei_path), "path": nuclei_path or ""},
+        "zap": {"installed": bool(zap_path), "path": zap_path or ""}
     }
 
 
@@ -561,6 +588,76 @@ def run_nuclei_probe(targets: str, config: Dict[str, Any]) -> List[Dict[str, Any
     return findings
 
 
+def run_zap_probe(targets: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    zap_path = _find_zap_bin()
+    if not zap_path:
+        return []
+
+    findings: List[Dict[str, Any]] = []
+    target_list = _sanitize_targets(targets)
+    if not target_list:
+        return []
+
+    urls: List[str] = []
+    for t in target_list:
+        if t.lower().startswith(("http://", "https://")):
+            urls.append(t)
+        else:
+            urls.append(f"https://{t}")
+            urls.append(f"http://{t}")
+
+    import tempfile, uuid
+    for u in list(dict.fromkeys(urls))[:4]:
+        out_xml = os.path.join(tempfile.gettempdir(), f"uriel_zap_{os.getpid()}_{uuid.uuid4().hex[:8]}.xml")
+        try:
+            subprocess.run([zap_path, "-cmd", "-quickurl", u, "-quickout", out_xml, "-quickprogress"], capture_output=True, text=True, timeout=240)
+            if os.path.isfile(out_xml):
+                root = ET.parse(out_xml).getroot()
+                for site in root.findall("site"):
+                    s_host = site.get("host") or u.split("://")[-1].split("/")[0].split(":")[0]
+                    try:
+                        s_port = int(site.get("port") or 80)
+                    except Exception:
+                        s_port = 80
+                    alerts_el = site.find("alerts")
+                    if alerts_el is None:
+                        continue
+                    for alert in alerts_el.findall("alertitem"):
+                        title = (alert.findtext("alert") or "OWASP ZAP Finding").strip()
+                        rc = int(alert.findtext("riskcode") or 0) if str(alert.findtext("riskcode") or "").isdigit() else 0
+                        sev = "high" if rc >= 3 else ("medium" if rc == 2 else ("low" if rc == 1 else "info"))
+                        cvss = 7.5 if sev == "high" else (5.3 if sev == "medium" else (3.1 if sev == "low" else 0.0))
+                        cwe_raw = (alert.findtext("cweid") or "").strip()
+                        desc = re.sub(r"<[^>]+>", " ", alert.findtext("desc") or title).strip()
+                        sol = re.sub(r"<[^>]+>", " ", alert.findtext("solution") or "").strip()
+                        findings.append({
+                            "host": s_host,
+                            "port": s_port,
+                            "protocol": "tcp",
+                            "service": "https" if s_port in (443, 8443) else "http",
+                            "title": title,
+                            "severity": sev,
+                            "cvss": cvss,
+                            "cve_ids": "",
+                            "cwe_id": f"CWE-{cwe_raw}" if cwe_raw.isdigit() and int(cwe_raw) > 0 else "",
+                            "source_engine": "zap",
+                            "description": desc,
+                            "evidence": u,
+                            "remediation": sol,
+                            "mitre_tactic": "Discovery",
+                            "mitre_technique": "T1190 - Exploit Public-Facing Application",
+                        })
+        except Exception as e:
+            print(f"[ZAP ERROR] {e}")
+        finally:
+            if os.path.isfile(out_xml):
+                try:
+                    os.remove(out_xml)
+                except Exception:
+                    pass
+    return findings
+
+
 # ==========================================
 # SCAN EXECUTION CONTROLLER
 # ==========================================
@@ -685,10 +782,18 @@ async def execute_job(client: ProbeClient, job: Dict[str, Any], insecure: bool =
         # 3. Nuclei Engine
         if "nuclei" in engines and shutil.which("nuclei"):
             logs.append({"time": now_time_str(), "level": "INFO", "msg": "[Nuclei Engine] Avvio motore Nuclei locale..."})
-            client.update_progress(scan_id, 85, "Esecuzione scansione Nuclei locale...", logs)
+            client.update_progress(scan_id, 80, "Esecuzione scansione Nuclei locale...", logs)
             nuclei_findings = await asyncio.to_thread(run_nuclei_probe, targets_str, config)
             findings.extend(nuclei_findings)
             logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[Nuclei Engine] Completato. {len(nuclei_findings)} finding identificati."})
+
+        # 4. OWASP ZAP Engine
+        if "zap" in engines and _find_zap_bin():
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": "[OWASP ZAP Engine] Avvio scansione web ZAP locale..."})
+            client.update_progress(scan_id, 90, "Esecuzione OWASP ZAP Web Scan locale...", logs)
+            zap_findings = await asyncio.to_thread(run_zap_probe, targets_str, config)
+            findings.extend(zap_findings)
+            logs.append({"time": now_time_str(), "level": "INFO", "msg": f"[OWASP ZAP Engine] Completato. {len(zap_findings)} alert web rilevati."})
 
         logs.append({"time": now_time_str(), "level": "INFO", "msg": "Caricamento risultati finali completato."})
         client.upload_results(scan_id, hosts=hosts, logs=logs, findings=findings)
@@ -705,8 +810,15 @@ async def execute_job(client: ProbeClient, job: Dict[str, Any], insecure: bool =
 # MAIN LOOP
 # ==========================================
 
-async def run_probe_loop(server: str, token: str, interval: int = 5, insecure: bool = False, run_once: bool = False) -> None:
-    client = ProbeClient(server, token, insecure=insecure)
+async def run_probe_loop(
+    server: str,
+    token: str,
+    interval: int = 5,
+    insecure: bool = False,
+    run_once: bool = False,
+    ca_bundle: Optional[str] = None,
+) -> None:
+    client = ProbeClient(server, token, insecure=insecure, ca_bundle=ca_bundle)
     engines = detect_local_engines()
 
     print("=" * 60)
@@ -741,30 +853,149 @@ async def run_probe_loop(server: str, token: str, interval: int = 5, insecure: b
         await asyncio.sleep(interval)
 
 
+def _runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _extract_msi_config_payload(msi_path: Path) -> Dict[str, Any]:
+    raw = msi_path.read_bytes()
+    start_idx = raw.find(CFG_MARKER_START)
+    if start_idx == -1:
+        raise RuntimeError(f"Configuration marker not found inside MSI: {msi_path}")
+    payload_start = start_idx + len(CFG_MARKER_START)
+    end_idx = raw.find(CFG_MARKER_END, payload_start)
+    if end_idx == -1:
+        raise RuntimeError(f"Unterminated configuration marker inside MSI: {msi_path}")
+    raw_json = raw[payload_start:end_idx].decode("utf-8").strip()
+    return json.loads(raw_json)
+
+
+def _install_from_msi_data(raw_data: str) -> None:
+    parts: Dict[str, str] = {}
+    for seg in raw_data.split(";"):
+        if "=" in seg:
+            k, v = seg.split("=", 1)
+            parts[k.strip().lower()] = v.strip()
+
+    base_dir = _runtime_base_dir()
+    install_dir = Path(parts.get("dir") or str(base_dir)).resolve()
+    msi_raw = parts.get("msi", "").strip().strip('"')
+    msi_path = Path(msi_raw) if msi_raw else None
+    if not msi_path or not msi_path.exists():
+        # Fallback: look for CachedPackage passed or exit gracefully if config already exists
+        cfg_file = install_dir / "probe_config.json"
+        if cfg_file.exists():
+            return
+        raise RuntimeError(f"Installer database not found: {msi_path}")
+
+    cfg = _extract_msi_config_payload(msi_path)
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    ca_pem = str(cfg.pop("ca_pem", "") or "").strip()
+    ca_path = install_dir / "cacert.pem"
+    if ca_pem:
+        parts_pem = [ca_pem]
+        if certifi is not None:
+            try:
+                parts_pem.append(Path(certifi.where()).read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                pass
+        ca_path.write_text("\n".join(parts_pem) + "\n", encoding="utf-8")
+        cfg["cacert"] = str(ca_path)
+
+    cfg_path = install_dir / "probe_config.json"
+    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+    exe_path = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else (install_dir / "urielscan_probe.exe")
+    if os.name == "nt" and exe_path.exists():
+        task_name = "UrielScanRemoteProbe"
+        cmd_tr = f'"{exe_path}" --config "{cfg_path}"'
+        subprocess.run(
+            ["schtasks", "/Create", "/F", "/TN", task_name, "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", cmd_tr],
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True, check=False)
+
+
+def _uninstall_probe_service(install_dir_raw: str) -> None:
+    if os.name == "nt":
+        task_name = "UrielScanRemoteProbe"
+        subprocess.run(["schtasks", "/End", "/TN", task_name], capture_output=True, check=False)
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", task_name], capture_output=True, check=False)
+    cleaned_dir = install_dir_raw.strip()
+    if cleaned_dir.lower().startswith("dir="):
+        cleaned_dir = cleaned_dir.split("=", 1)[1].split(";", 1)[0].strip()
+    base_dir = Path(cleaned_dir).resolve() if cleaned_dir else _runtime_base_dir()
+    for fname in ("probe_config.json", "cacert.pem"):
+        fp = base_dir / fname
+        if fp.exists():
+            try:
+                fp.unlink()
+            except Exception:
+                pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="UrielScan Standalone Remote Probe Agent")
-    parser.add_argument("--server", required=True, help="UrielScan server URL (es. https://uriel.msp.com o http://127.0.0.1:8000)")
+    parser.add_argument("--config", default="", help="Percorso probe_config.json (auto-rilevato nella cartella dell'eseguibile se presente)")
+    parser.add_argument("--server", default="", help="UrielScan server URL (es. https://uriel.msp.com o http://127.0.0.1:8000)")
     parser.add_argument("--token", default="", help="Agent token (preferisci variabile URIELSCAN_AGENT_TOKEN o --token-file)")
     parser.add_argument("--token-file", default="", help="Percorso file contenente il token dell'agente")
+    parser.add_argument("--cacert", default="", help="Percorso bundle CA PEM per verifica TLS del server")
     parser.add_argument("--interval", type=int, default=5, help="Intervallo polling e heartbeat in secondi (default: 5)")
     parser.add_argument("--insecure", action="store_true", help="Disabilita verifica certificato SSL del server (per certificati self-signed)")
     parser.add_argument("--once", action="store_true", help="Esegue un solo ciclo di heartbeat/job ed esce")
+    parser.add_argument("--install-from-msi-data", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--uninstall-probe", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
-    token = args.token.strip() or os.environ.get("URIELSCAN_AGENT_TOKEN", "").strip()
+
+    if args.install_from_msi_data:
+        _install_from_msi_data(args.install_from_msi_data)
+        return
+
+    if args.uninstall_probe is not None:
+        _uninstall_probe_service(args.uninstall_probe)
+        return
+
+    base_dir = _runtime_base_dir()
+    cfg: Dict[str, Any] = {}
+    cfg_candidate = Path(args.config) if args.config else (base_dir / "probe_config.json")
+    if cfg_candidate.exists():
+        try:
+            cfg = json.loads(cfg_candidate.read_text(encoding="utf-8"))
+        except Exception as exc:
+            parser.error(f"Impossibile leggere file di configurazione {cfg_candidate}: {exc}")
+
+    server = (args.server or cfg.get("server_url") or os.environ.get("URIELSCAN_SERVER_URL", "")).strip()
+    if not server:
+        parser.error("--server richiesto (oppure impostabile via probe_config.json).")
+
+    token = (args.token or os.environ.get("URIELSCAN_AGENT_TOKEN", "") or cfg.get("token", "")).strip()
     if not token and args.token_file:
         with open(args.token_file, "r", encoding="utf-8") as tf:
             token = tf.read().strip()
     if not token:
-        parser.error("Token richiesto: passa --token, --token-file oppure imposta URIELSCAN_AGENT_TOKEN.")
+        parser.error("Token richiesto: passa --token, --token-file, probe_config.json oppure imposta URIELSCAN_AGENT_TOKEN.")
+
+    ca_bundle = (args.cacert or cfg.get("cacert") or "").strip() or None
+    if not ca_bundle and (base_dir / "cacert.pem").exists():
+        ca_bundle = str(base_dir / "cacert.pem")
+
+    insecure = bool(args.insecure or cfg.get("insecure", False))
+    interval = int(args.interval if args.interval != 5 else cfg.get("interval", 5))
 
     try:
         asyncio.run(run_probe_loop(
-            server=args.server,
+            server=server,
             token=token,
-            interval=args.interval,
-            insecure=args.insecure,
-            run_once=args.once
+            interval=interval,
+            insecure=insecure,
+            run_once=args.once,
+            ca_bundle=ca_bundle,
         ))
     except KeyboardInterrupt:
         print("\nProbe arrestata dall'utente.")

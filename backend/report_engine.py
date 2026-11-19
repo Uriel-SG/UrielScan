@@ -2,10 +2,13 @@ import os
 import html
 import json
 import uuid
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from backend.database import get_db_connection, get_scan_by_id, get_findings_for_scan, get_organization_by_id, get_settings
+from backend.scanners.deduplicator import sort_findings_by_severity
+from backend.export_engine import _load_urielscan_logo_bytes
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE_DIR / "reports"
@@ -45,7 +48,9 @@ def generate_html_report(
 
     org = get_organization_by_id(scan["org_id"]) or {}
     settings = get_settings()
-    findings = get_findings_for_scan(scan_id)
+    findings = sort_findings_by_severity(get_findings_for_scan(scan_id))
+    _uriel_raw = _load_urielscan_logo_bytes()
+    uriel_logo_uri = f"data:image/png;base64,{base64.b64encode(_uriel_raw).decode('ascii')}" if _uriel_raw else ""
 
     report_id = f"REP-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
     default_client_name = "Cliente" if is_it else "Client"
@@ -610,7 +615,11 @@ def generate_html_report(
             <button class="btn-print" onclick="window.print()">{print_btn_txt}</button>
         </div>
 
-        <div class="classification-header">{_esc(classification)}</div>
+        <!-- Top Bar: Classification (left) + Organization Logo or UrielScan Logo Fallback (top-right) -->
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0 14px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 16px;">
+            <span class="classification-header" style="margin: 0; padding: 4px 10px; border-radius: 4px; text-align: left;">{_esc(classification)}</span>
+            {f'<img src="{client_logo or uriel_logo_uri}" alt="{client_name if client_logo else "UrielScan"}" style="max-height: 36px; width: auto; object-fit: contain;" />' if (client_logo or uriel_logo_uri) else '<strong style="font-size:16px; letter-spacing:1px; color:#1e3a5f;">URIELSCAN</strong>'}
+        </div>
 
         <!-- Dual Branding Header -->
         <div class="dual-branding">
@@ -626,7 +635,6 @@ def generate_html_report(
             <div class="brand-divider">{brand_divider_txt}</div>
 
             <div class="brand-box" style="flex-direction: row-reverse; text-align: right;">
-                {f'<img src="{client_logo}" class="brand-logo" alt="Client Logo"/>' if client_logo else ''}
                 <div class="brand-text">
                     <h3>{client_name}</h3>
                     <p>{industry_lbl} {client_industry}</p>

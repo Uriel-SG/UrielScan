@@ -70,7 +70,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
   const [isScanDropdownOpen, setIsScanDropdownOpen] = useState<boolean>(false);
   const [showAllScansHistory, setShowAllScansHistory] = useState<boolean>(false);
   const [historySearch, setHistorySearch] = useState<string>('');
-  const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
+  const [openRowMenu, setOpenRowMenu] = useState<{ scan: Scan; top: number; right: number } | null>(null);
   const [scanToDelete, setScanToDelete] = useState<Scan | null>(null);
   const scanDropdownRef = useRef<HTMLDivElement | null>(null);
 
@@ -79,10 +79,15 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
       if (scanDropdownRef.current && !scanDropdownRef.current.contains(e.target as Node)) {
         setIsScanDropdownOpen(false);
       }
-      setOpenRowMenuId(null);
+      setOpenRowMenu(null);
     };
+    const handleScroll = () => setOpenRowMenu(null);
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
   }, []);
 
   const formatScanDateTime = (iso?: string) => {
@@ -343,7 +348,8 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
       sevLower === selectedSeverity.toLowerCase();
 
     const matchEngine =
-      selectedEngine === 'all' || f.source_engine.toLowerCase() === selectedEngine.toLowerCase();
+      selectedEngine === 'all' ||
+      f.source_engine.toLowerCase().split('+').includes(selectedEngine.toLowerCase());
 
     const matchStatus =
       selectedStatus === 'all' || f.status.toLowerCase() === selectedStatus.toLowerCase();
@@ -486,49 +492,30 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                           </div>
                         </td>
                         <td
-                          className="py-3 px-4 text-right relative"
+                          className="py-3 px-4 text-right"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <button
+                            onMouseDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
-                              setOpenRowMenuId(openRowMenuId === s.id ? null : s.id);
+                              if (openRowMenu?.scan.id === s.id) {
+                                setOpenRowMenu(null);
+                              } else {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                const openUp = window.innerHeight - rect.bottom < 105;
+                                setOpenRowMenu({
+                                  scan: s,
+                                  top: openUp ? Math.max(8, rect.top - 78) : rect.bottom + 4,
+                                  right: Math.max(12, window.innerWidth - rect.right),
+                                });
+                              }
                             }}
                             className="p-1.5 rounded hover:bg-subtle text-theme-secondary hover:text-theme-primary transition-colors"
                             title={L('Scan actions menu', 'Menu azioni scansione')}
                           >
                             <MoreVertical className="w-4 h-4" />
                           </button>
-
-                          {openRowMenuId === s.id && (
-                            <div
-                              onMouseDown={(e) => e.stopPropagation()}
-                              className="absolute right-4 top-10 z-30 w-44 card-industrial border border-theme shadow-xl py-1 text-left"
-                            >
-                              <button
-                                onClick={() => {
-                                  setOpenRowMenuId(null);
-                                  onSelectScan(s.id);
-                                  setShowAllScansHistory(false);
-                                }}
-                                className="w-full px-3 py-1.5 text-xs text-theme-primary hover:bg-subtle flex items-center space-x-2"
-                              >
-                                <ExternalLink className="w-3.5 h-3.5 text-theme-accent" />
-                                <span>{L('Open details', 'Apri dettagli')}</span>
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setOpenRowMenuId(null);
-                                  setScanToDelete(s);
-                                  setIsDeleteModalOpen(true);
-                                }}
-                                className="w-full px-3 py-1.5 text-xs text-red-400 hover:bg-red-950/40 flex items-center space-x-2"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span>{L('Delete scan', 'Elimina scansione')}</span>
-                              </button>
-                            </div>
-                          )}
                         </td>
                       </tr>
                     );
@@ -538,6 +525,40 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
             </div>
           )}
         </div>
+
+        {/* Fixed-position Row Action Menu (escapes table overflow clipping) */}
+        {openRowMenu && (
+          <div
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{ top: openRowMenu.top, right: openRowMenu.right }}
+            className="fixed z-50 w-44 bg-panel border border-theme rounded shadow-xl py-1 text-left"
+          >
+            <button
+              onClick={() => {
+                const targetScan = openRowMenu.scan;
+                setOpenRowMenu(null);
+                onSelectScan(targetScan.id);
+                setShowAllScansHistory(false);
+              }}
+              className="w-full px-3 py-1.5 text-xs text-theme-primary hover:bg-hover flex items-center space-x-2 cursor-pointer"
+            >
+              <ExternalLink className="w-3.5 h-3.5 text-theme-accent" />
+              <span>{L('Open details', 'Apri dettagli')}</span>
+            </button>
+            <button
+              onClick={() => {
+                const targetScan = openRowMenu.scan;
+                setOpenRowMenu(null);
+                setScanToDelete(targetScan);
+                setIsDeleteModalOpen(true);
+              }}
+              className="w-full px-3 py-1.5 text-xs text-red-400 hover:bg-red-950/40 flex items-center space-x-2 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{L('Delete scan', 'Elimina scansione')}</span>
+            </button>
+          </div>
+        )}
 
         {/* Delete Scan Confirm Modal (History View) */}
         {(scanToDelete || currentScan) && (
@@ -889,6 +910,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                 <option value="all" className="bg-panel text-theme-primary">{L('All Engines', 'Tutti i Motori')}</option>
                 <option value="nmap" className="bg-panel text-theme-primary">Nmap NSE</option>
                 <option value="nuclei" className="bg-panel text-theme-primary">Nuclei</option>
+                <option value="zap" className="bg-panel text-theme-primary">OWASP ZAP</option>
                 <option value="native_web" className="bg-panel text-theme-primary">Native Web</option>
                 <option value="native_net" className="bg-panel text-theme-primary">Native Net</option>
               </select>

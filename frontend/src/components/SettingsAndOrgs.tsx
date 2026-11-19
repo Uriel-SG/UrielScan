@@ -23,9 +23,12 @@ import {
   Database,
   Radio,
   Server,
-  Activity
+  Activity,
+  ChevronDown,
+  Terminal,
+  Link2
 } from 'lucide-react';
-import { Organization, ScannerProfile, EngineStatus, AuthUser, RemoteAgent } from '../types';
+import { Organization, ScannerProfile, EngineStatus, AuthUser, RemoteAgent, ProbeInstallerPackage } from '../types';
 import { api } from '../services/api';
 import { useToast, ConfirmModal } from './UIFeedback';
 import { useI18n } from '../i18n/LanguageContext';
@@ -58,9 +61,13 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
   const [probeName, setProbeName] = useState<string>('');
   const [isCreatingProbe, setIsCreatingProbe] = useState<boolean>(false);
   const [newlyCreatedProbe, setNewlyCreatedProbe] = useState<RemoteAgent | null>(null);
-  const [isDownloadingScript, setIsDownloadingScript] = useState<boolean>(false);
-  const [copiedToken, setCopiedToken] = useState<boolean>(false);
-  const [copiedCommand, setCopiedCommand] = useState<boolean>(false);
+  const [probeServerUrl, setProbeServerUrl] = useState<string>(() => (typeof window !== 'undefined' ? window.location.origin : ''));
+  const [downloadingInstallerKey, setDownloadingInstallerKey] = useState<string | null>(null);
+  const [openInstallerMenuId, setOpenInstallerMenuId] = useState<string | null>(null);
+  const [installerPackage, setInstallerPackage] = useState<ProbeInstallerPackage | null>(null);
+  const [installerTokenHint, setInstallerTokenHint] = useState<string | undefined>(undefined);
+  const [installerInsecure, setInstallerInsecure] = useState<boolean>(false);
+  const [copiedPkgField, setCopiedPkgField] = useState<'url' | 'cmd' | null>(null);
 
   // Client Org Form state
   const [editingOrg, setEditingOrg] = useState<Organization | null>(null);
@@ -172,16 +179,45 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
     }
   };
 
-  const handleDownloadProbeScript = async () => {
-    setIsDownloadingScript(true);
+  const handlePrepareInstaller = async (
+    agentId: string,
+    platform: 'windows_msi' | 'linux_sh',
+    token?: string,
+    insecureFlag: boolean = installerInsecure
+  ) => {
+    const key = `${agentId}:${platform}`;
+    setDownloadingInstallerKey(key);
+    setOpenInstallerMenuId(null);
+    if (token) setInstallerTokenHint(token);
+    else if (installerPackage && String(installerPackage.agent_id) !== String(agentId)) setInstallerTokenHint(undefined);
     try {
-      await api.downloadProbeScript();
-      showToast(L('urielscan_probe.py downloaded successfully.', 'urielscan_probe.py scaricato con successo.'), 'success');
+      const effectiveToken = token || (installerPackage && String(installerPackage.agent_id) === String(agentId) ? installerTokenHint : undefined);
+      const pkg = await api.createProbeInstallerLink(agentId, {
+        platform,
+        server_url: probeServerUrl.trim() || window.location.origin,
+        token: effectiveToken,
+        insecure: insecureFlag,
+      });
+      setInstallerPackage(pkg);
+      setCopiedPkgField(null);
     } catch (err: any) {
-      showToast(err.message || L('Failed to download probe script.', 'Impossibile scaricare urielscan_probe.py.'), 'error');
+      showToast(err?.message || L('Failed to prepare probe installer.', 'Errore nella preparazione installer sonda.'), 'error');
     } finally {
-      setIsDownloadingScript(false);
+      setDownloadingInstallerKey(null);
     }
+  };
+
+  const triggerDirectInstallerDownload = (pkg: ProbeInstallerPackage) => {
+    const a = document.createElement('a');
+    a.href = pkg.local_download_path;
+    a.download = pkg.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    showToast(
+      L(`Downloading ${pkg.filename}...`, `Download di ${pkg.filename} avviato...`),
+      'success'
+    );
   };
 
   const promptDeleteProbe = (agent: RemoteAgent) => {
@@ -878,6 +914,20 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                   )}
                 </div>
               </div>
+
+              <div className="p-3 rounded border border-theme bg-subtle flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-theme-primary">OWASP ZAP Web Scanner</div>
+                  <div className="text-[11px] text-theme-secondary">
+                    {engineStatus.zap?.available
+                      ? `${engineStatus.zap.version || 'OWASP ZAP'} • ${L('Cross-engine deduplication enabled', 'Deduplicazione integrata con Nuclei/Nmap attiva')}`
+                      : L('Not detected (start ZAP daemon on :8080 / URIELSCAN_ZAP_URL or install ZAP CLI)', 'Non rilevato (avvia daemon ZAP su :8080 / URIELSCAN_ZAP_URL oppure installa ZAP CLI)')}
+                  </div>
+                </div>
+                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border shrink-0 ${engineStatus.zap?.available ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400' : 'bg-amber-950/30 border-amber-600 text-amber-400'}`}>
+                  {engineStatus.zap?.available ? L('ACTIVE', 'ATTIVO') : L('NOT CONFIGURED', 'NON CONFIGURATO')}
+                </span>
+              </div>
             </div>
             {nucleiInstallResult && (
               <div className="p-2 rounded bg-subtle text-xs font-mono text-theme-secondary border border-theme">
@@ -1242,20 +1292,13 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                 )}
               </p>
             </div>
-            <div className="shrink-0">
-              <button
-                type="button"
-                onClick={handleDownloadProbeScript}
-                disabled={isDownloadingScript}
-                className="btn-primary flex items-center space-x-2 px-3.5 py-2 text-xs font-semibold shadow-sm"
-              >
-                {isDownloadingScript ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <DownloadCloud className="w-4 h-4" />
-                )}
-                <span>{L('Download urielscan_probe.py', 'Scarica urielscan_probe.py')}</span>
-              </button>
+            <div className="shrink-0 flex flex-col items-end gap-1">
+              <span className="text-[10px] font-mono px-2.5 py-1 rounded bg-subtle border border-theme text-theme-accent uppercase tracking-wider">
+                {L('Self-Contained Packages: .MSI + .SH', 'Pacchetti Autoconclusivi: .MSI + .SH')}
+              </span>
+              <span className="text-[10px] text-theme-muted font-mono">
+                {L('Includes embedded key, Python & TLS certs', 'Include chiave, Python e certificati TLS')}
+              </span>
             </div>
           </div>
 
@@ -1267,11 +1310,11 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                 <span>{L('Enroll New Remote Probe', 'Registra Nuova Sonda Remota')}</span>
               </h3>
               <span className="text-[10px] font-mono text-theme-muted">
-                {L('Generates a cryptographically secure token', 'Genera un token crittografico sicuro')}
+                {L('Generates packaged .msi & .sh installers', 'Genera installer pronti .msi e .sh')}
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <div>
                 <label className="block text-xs font-medium text-theme-secondary mb-1">
                   {L('Assign to Organization *', 'Assegna a Organizzazione *')}
@@ -1287,6 +1330,19 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-theme-secondary mb-1">
+                  {L('Probe Server URL', 'URL Server Sonda')}
+                </label>
+                <input
+                  type="text"
+                  value={probeServerUrl}
+                  onChange={(e) => setProbeServerUrl(e.target.value)}
+                  placeholder="https://uriel.example.com"
+                  className="input-industrial w-full px-2.5 py-1.5 text-xs font-mono"
+                />
               </div>
 
               <div className="md:col-span-2">
@@ -1308,86 +1364,64 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                     className="btn-primary px-4 py-1.5 text-xs font-semibold whitespace-nowrap flex items-center space-x-1.5 shrink-0"
                   >
                     {isCreatingProbe ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-                    <span>{isCreatingProbe ? L('Generating...', 'Generazione...') : L('Generate Probe Token', 'Genera Token Sonda')}</span>
+                    <span>{isCreatingProbe ? L('Creating...', 'Creazione...') : L('Create Probe', 'Crea Sonda')}</span>
                   </button>
                 </div>
               </div>
             </div>
           </form>
 
-          {/* One-time Token Banner / Card */}
-          {newlyCreatedProbe && newlyCreatedProbe.token && (
-            <div className="p-4 rounded border-2 border-emerald-500/60 bg-emerald-950/20 space-y-3 animate-in fade-in duration-200">
-              <div className="flex items-start justify-between gap-2">
+          {/* Clean Download Card upon Probe Creation */}
+          {newlyCreatedProbe && (
+            <div className="p-4 rounded border-2 border-emerald-500/60 bg-emerald-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5">
                 <div className="flex items-center space-x-2 text-emerald-400 font-bold text-xs uppercase tracking-wider">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span>{L('One-Time Probe Token Generated Successfully', 'Token Sonda Monouso Generato con Successo')}</span>
+                  <span>{L('Probe Ready:', 'Sonda Pronta:')} {newlyCreatedProbe.name}</span>
                 </div>
+                <p className="text-[11px] text-theme-secondary">
+                  {L(
+                    'Download — Auth key, Python runtime & TLS certificates are embedded inside the installer:',
+                    'Download — Chiave di autenticazione, runtime Python e certificati TLS sono incorporati nell\'installer:'
+                  )}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handlePrepareInstaller(newlyCreatedProbe.id, 'windows_msi', newlyCreatedProbe.token)}
+                  disabled={downloadingInstallerKey !== null}
+                  className="btn-primary px-3.5 py-2 text-xs font-semibold flex items-center space-x-1.5"
+                >
+                  {downloadingInstallerKey === `${newlyCreatedProbe.id}:windows_msi` ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <DownloadCloud className="w-3.5 h-3.5" />
+                  )}
+                  <span>{L('Download Windows (.msi)', 'Download Windows (.msi)')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePrepareInstaller(newlyCreatedProbe.id, 'linux_sh', newlyCreatedProbe.token)}
+                  disabled={downloadingInstallerKey !== null}
+                  className="btn-secondary px-3.5 py-2 text-xs font-semibold flex items-center space-x-1.5"
+                >
+                  {downloadingInstallerKey === `${newlyCreatedProbe.id}:linux_sh` ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <DownloadCloud className="w-3.5 h-3.5" />
+                  )}
+                  <span>{L('Download Linux (.sh)', 'Download Linux (.sh)')}</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setNewlyCreatedProbe(null)}
-                  className="text-theme-muted hover:text-theme-primary text-xs font-semibold px-2 py-0.5 rounded bg-subtle border border-theme"
+                  className="text-theme-muted hover:text-theme-primary text-xs px-2 py-1.5"
+                  title={L('Dismiss', 'Chiudi')}
                 >
-                  {L('Dismiss Banner', 'Chiudi Banner')}
+                  ×
                 </button>
-              </div>
-
-              <p className="text-xs text-theme-secondary">
-                {L(
-                  'Copy this registration token now. For security, raw tokens cannot be retrieved again after leaving this view.',
-                  'Copia questo token ora. Per motivi di sicurezza, il token in chiaro non potrà più essere visualizzato dopo la chiusura.'
-                )}
-              </p>
-
-              <div className="space-y-2">
-                <div>
-                  <label className="block text-[11px] font-bold text-theme-primary uppercase tracking-wide mb-1">
-                    {L('Probe Auth Token:', 'Token di Autenticazione Sonda:')}
-                  </label>
-                  <div className="flex items-center space-x-2">
-                    <code className="p-2 rounded bg-canvas border border-theme text-emerald-400 font-mono text-xs select-all flex-1 break-all">
-                      {newlyCreatedProbe.token}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(newlyCreatedProbe.token!);
-                        setCopiedToken(true);
-                        setTimeout(() => setCopiedToken(false), 2000);
-                        showToast(L('Token copied to clipboard.', 'Token copiato negli appunti.'), 'info');
-                      }}
-                      className="btn-secondary px-2.5 py-1.5 text-xs flex items-center space-x-1 shrink-0"
-                    >
-                      {copiedToken ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedToken ? L('Copied!', 'Copiato!') : L('Copy Token', 'Copia Token')}</span>
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-theme-primary uppercase tracking-wide mb-1">
-                    {L('Ready-to-Run Launch Command:', 'Comando Pronto per l\'Esecuzione:')}
-                  </label>
-                  <div className="flex items-center space-x-2">
-                    <pre className="p-2 rounded bg-canvas border border-theme text-theme-accent font-mono text-xs select-all flex-1 overflow-x-auto">
-                      {`python urielscan_probe.py --server ${window.location.origin} --token ${newlyCreatedProbe.token}`}
-                    </pre>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const cmd = `python urielscan_probe.py --server ${window.location.origin} --token ${newlyCreatedProbe.token}`;
-                        navigator.clipboard.writeText(cmd);
-                        setCopiedCommand(true);
-                        setTimeout(() => setCopiedCommand(false), 2000);
-                        showToast(L('Command copied to clipboard.', 'Comando copiato negli appunti.'), 'info');
-                      }}
-                      className="btn-secondary px-2.5 py-1.5 text-xs flex items-center space-x-1 shrink-0"
-                    >
-                      {copiedCommand ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedCommand ? L('Copied!', 'Copiato!') : L('Copy Command', 'Copia Comando')}</span>
-                    </button>
-                  </div>
-                </div>
               </div>
             </div>
           )}
@@ -1505,6 +1539,15 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                               </span>
                               <span
                                 className={`px-1.5 py-0.5 rounded border ${
+                                  eng.zap
+                                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-400'
+                                    : 'bg-subtle border-theme text-theme-muted line-through opacity-60'
+                                }`}
+                              >
+                                ZAP
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded border ${
                                   eng.native !== false
                                     ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-400'
                                     : 'bg-subtle border-theme text-theme-muted line-through opacity-60'
@@ -1520,14 +1563,57 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                           </td>
 
                           <td className="p-2.5 text-right whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => promptDeleteProbe(agent)}
-                              className="btn-secondary p-1 text-red-400 hover:text-red-300"
-                              title={L('Revoke Probe', 'Revoca Sonda')}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            <div className="inline-flex items-center space-x-1.5 relative">
+                              <div className="relative">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setOpenInstallerMenuId((cur) => (cur === agent.id ? null : agent.id))
+                                  }
+                                  disabled={downloadingInstallerKey !== null}
+                                  className="btn-secondary px-2 py-1 text-[11px] font-semibold inline-flex items-center space-x-1"
+                                  title={L('Download self-contained installer (.msi / .sh)', 'Scarica installer autoconclusivo (.msi / .sh)')}
+                                >
+                                  {downloadingInstallerKey?.startsWith(`${agent.id}:`) ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <DownloadCloud className="w-3 h-3 text-theme-accent" />
+                                  )}
+                                  <span>{L('Download', 'Download')}</span>
+                                  <ChevronDown className="w-3 h-3 text-theme-muted" />
+                                </button>
+
+                                {openInstallerMenuId === agent.id && (
+                                  <div className="absolute right-0 top-full mt-1 w-44 bg-panel border border-theme rounded shadow-xl z-50 py-1 text-left">
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePrepareInstaller(agent.id, 'windows_msi')}
+                                      className="w-full px-3 py-1.5 text-xs text-theme-primary hover:bg-hover transition flex items-center justify-between cursor-pointer"
+                                    >
+                                      <span>Windows Installer</span>
+                                      <span className="font-mono text-[10px] text-theme-accent">.msi</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePrepareInstaller(agent.id, 'linux_sh')}
+                                      className="w-full px-3 py-1.5 text-xs text-theme-primary hover:bg-hover transition flex items-center justify-between cursor-pointer"
+                                    >
+                                      <span>Linux Installer</span>
+                                      <span className="font-mono text-[10px] text-theme-accent">.sh</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => promptDeleteProbe(agent)}
+                                className="btn-secondary p-1 text-red-400 hover:text-red-300"
+                                title={L('Revoke Probe', 'Revoca Sonda')}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1536,6 +1622,151 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Probe Installer & Silent RMM Deployment Modal */}
+      {installerPackage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+          <div className="card-industrial w-full max-w-2xl p-5 space-y-4 shadow-2xl border border-theme">
+            <div className="flex items-start justify-between gap-3 border-b border-theme-subtle pb-3">
+              <div>
+                <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-theme-accent flex items-center space-x-1.5">
+                  <Terminal className="w-3.5 h-3.5" />
+                  <span>{L('Probe Installer & RMM Deployment', 'Installer Sonda & Deploy Silenzioso RMM')}</span>
+                </div>
+                <h3 className="text-sm font-bold text-theme-primary mt-0.5">
+                  {installerPackage.agent_name} — <span className="font-mono text-theme-accent">{installerPackage.filename}</span>
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setInstallerPackage(null)}
+                className="text-theme-muted hover:text-theme-primary text-sm px-2 py-0.5 rounded bg-subtle border border-theme"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Platform Switcher + Download Action + TLS Option */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="inline-flex rounded border border-theme bg-subtle p-0.5">
+                <button
+                  type="button"
+                  disabled={downloadingInstallerKey !== null}
+                  onClick={() => handlePrepareInstaller(String(installerPackage.agent_id), 'windows_msi')}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded transition cursor-pointer ${
+                    installerPackage.platform === 'windows_msi'
+                      ? 'bg-panel text-theme-accent shadow-xs'
+                      : 'text-theme-secondary hover:text-theme-primary'
+                  }`}
+                >
+                  Windows (.msi)
+                </button>
+                <button
+                  type="button"
+                  disabled={downloadingInstallerKey !== null}
+                  onClick={() => handlePrepareInstaller(String(installerPackage.agent_id), 'linux_sh')}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded transition cursor-pointer ${
+                    installerPackage.platform === 'linux_sh'
+                      ? 'bg-panel text-theme-accent shadow-xs'
+                      : 'text-theme-secondary hover:text-theme-primary'
+                  }`}
+                >
+                  Linux (.sh)
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => triggerDirectInstallerDownload(installerPackage)}
+                className="btn-primary px-4 py-2 text-xs font-semibold flex items-center space-x-2"
+              >
+                <DownloadCloud className="w-4 h-4" />
+                <span>{L('Download', 'Scarica')} {installerPackage.filename}</span>
+              </button>
+            </div>
+
+            <label className="flex items-center space-x-2 text-[11px] text-theme-secondary cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={installerInsecure}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setInstallerInsecure(next);
+                  handlePrepareInstaller(String(installerPackage.agent_id), installerPackage.platform, undefined, next);
+                }}
+                className="rounded border-theme bg-panel accent-violet-500"
+              />
+              <span>
+                {L(
+                  'Skip TLS certificate verification (for self-signed LAN certificates)',
+                  'Ignora verifica certificato TLS (per certificati self-signed su rete locale)'
+                )}
+              </span>
+            </label>
+
+            {/* Direct Target Download URL */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wide text-theme-secondary">
+                <span className="flex items-center space-x-1.5">
+                  <Link2 className="w-3.5 h-3.5 text-theme-accent" />
+                  <span>{L('Direct Download URL (Target Machine)', 'URL Download Diretto (Macchina Target)')}</span>
+                </span>
+                <span className="font-mono text-[10px] text-theme-muted">TTL 24h</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <code className="flex-1 p-2 rounded bg-canvas border border-theme font-mono text-[11px] text-theme-primary break-all select-all">
+                  {installerPackage.download_url}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(installerPackage.download_url);
+                    setCopiedPkgField('url');
+                    setTimeout(() => setCopiedPkgField(null), 2000);
+                    showToast(L('Download URL copied.', 'URL di download copiato.'), 'info');
+                  }}
+                  className="btn-secondary px-2.5 py-2 text-xs flex items-center space-x-1 shrink-0"
+                >
+                  {copiedPkgField === 'url' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedPkgField === 'url' ? L('Copied!', 'Copiato!') : L('Copy URL', 'Copia URL')}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Silent Background RMM Command */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wide text-theme-secondary">
+                <span className="flex items-center space-x-1.5">
+                  <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>
+                    {installerPackage.platform === 'windows_msi'
+                      ? L('PowerShell Silent Background Command (Admin / RMM)', 'Comando PowerShell Installazione Silenziosa (Admin / RMM)')
+                      : L('Bash Silent Background Command (Root / RMM)', 'Comando Bash Installazione Silenziosa (Root / RMM)')}
+                  </span>
+                </span>
+              </div>
+              <div className="flex items-start space-x-2">
+                <pre className="flex-1 p-2.5 rounded bg-canvas border border-theme font-mono text-[11px] text-emerald-400 whitespace-pre-wrap break-all select-all">
+                  {installerPackage.silent_command}
+                </pre>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(installerPackage.silent_command);
+                    setCopiedPkgField('cmd');
+                    setTimeout(() => setCopiedPkgField(null), 2000);
+                    showToast(L('Command copied to clipboard.', 'Comando copiato negli appunti.'), 'info');
+                  }}
+                  className="btn-secondary px-2.5 py-2 text-xs flex items-center space-x-1 shrink-0"
+                >
+                  {copiedPkgField === 'cmd' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedPkgField === 'cmd' ? L('Copied!', 'Copiato!') : L('Copy', 'Copia')}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -1,11 +1,74 @@
 import io
 import re
 import csv
+import struct
 import base64
 import zipfile
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 from xml.sax.saxutils import escape as xml_escape
+
+from backend.scanners.deduplicator import sort_findings_by_severity
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_urielscan_logo_bytes() -> Optional[bytes]:
+    """Loads the official UrielScan PNG logo for report headers."""
+    for rel in (
+        BASE_DIR / "frontend" / "dist" / "urielscan-header-uriel-ops.png",
+        BASE_DIR / "frontend" / "public" / "urielscan-header-uriel-ops.png",
+        BASE_DIR / "frontend" / "dist" / "urielscan-header.png",
+        BASE_DIR / "frontend" / "public" / "urielscan-header.png",
+    ):
+        if rel.is_file():
+            try:
+                return rel.read_bytes()
+            except Exception:
+                pass
+    return None
+
+
+def _png_dimensions(png_bytes: bytes) -> Tuple[int, int]:
+    """Reads width and height from a PNG IHDR chunk (fallback 400x76)."""
+    try:
+        if png_bytes[:8] == b"\x89PNG\r\n\x1a\n" and len(png_bytes) >= 24:
+            w, h = struct.unpack(">II", png_bytes[16:24])
+            if w > 0 and h > 0:
+                return w, h
+    except Exception:
+        pass
+    return 400, 76
+
+
+def _detect_image_meta(img_bytes: bytes) -> Tuple[str, str, int, int]:
+    """Return (ext, mime, width, height) for PNG or JPEG raster images."""
+    if img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        w, h = _png_dimensions(img_bytes)
+        return "png", "image/png", w, h
+    if img_bytes[:2] == b"\xff\xd8":
+        w, h = 400, 120
+        try:
+            idx = 2
+            while idx + 4 < len(img_bytes):
+                if img_bytes[idx] != 0xFF:
+                    idx += 1
+                    continue
+                marker = img_bytes[idx + 1]
+                if marker in (0xC0, 0xC1, 0xC2):
+                    if idx + 9 <= len(img_bytes):
+                        h, w = struct.unpack(">HH", img_bytes[idx + 5 : idx + 9])
+                    break
+                if marker in (0xD8, 0xD9, 0x01) or (0xD0 <= marker <= 0xD7):
+                    idx += 2
+                else:
+                    seg_len = struct.unpack(">H", img_bytes[idx + 2 : idx + 4])[0]
+                    idx += 2 + seg_len
+        except Exception:
+            pass
+        return "jpeg", "image/jpeg", max(1, w), max(1, h)
+    return "png", "image/png", 400, 120
 
 _XML_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
@@ -70,7 +133,8 @@ def export_scan_results_csv(
     org_map: Dict[int, Dict[str, Any]],
     lang: str = "en",
 ) -> bytes:
-    """Generates a UTF-8 BOM CSV containing all findings for Excel compatibility."""
+    """Generates a UTF-8 BOM CSV containing all findings sorted by severity."""
+    findings = sort_findings_by_severity(findings)
     is_it = (lang or "").lower().startswith("it")
     scan_name_map = {s["id"]: s.get("name", f"Scan #{s['id']}") for s in scans_meta}
     buf = io.StringIO()
@@ -150,7 +214,8 @@ def export_scan_results_txt(
     org_map: Dict[int, Dict[str, Any]],
     lang: str = "en",
 ) -> bytes:
-    """Generates a clean plain-text (.txt) report of hosts, ports, and findings."""
+    """Generates a clean plain-text (.txt) report of hosts, ports, and findings sorted by severity."""
+    findings = sort_findings_by_severity(findings)
     is_it = (lang or "").lower().startswith("it")
     now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
     lines: List[str] = [
@@ -246,6 +311,7 @@ def generate_pdf_document(
     lang: str = "en",
 ) -> bytes:
     """Generates a structured, printable A4 PDF report/export using ReportLab."""
+    findings = sort_findings_by_severity(findings)
     is_it = (lang or "").lower().startswith("it")
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -301,35 +367,41 @@ def generate_pdf_document(
 
     story: List[Any] = []
 
-    # Header with optional embedded client/MSP logos
+    # Header: MSSP / classification on left; organization logo on right (fallback to UrielScan logo only if org has none)
     mssp_name = mssp_profile.get("scanner_company_name") or mssp_profile.get("company_name") or "UrielScan MSSP"
     client_name = client_org.get("name") or ("Organizzazione Cliente" if is_it else "Client Organization")
     now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    logo_cells: List[Any] = []
     client_logo_bytes = _decode_data_url_image(client_org.get("logo_data") or client_org.get("logo_url") or "")
-    if client_logo_bytes:
+    header_logo_bytes = client_logo_bytes if client_logo_bytes else _load_urielscan_logo_bytes()
+    header_logo_img = None
+    if header_logo_bytes:
         try:
-            logo_img = RLImage(io.BytesIO(client_logo_bytes), width=26 * mm, height=14 * mm, kind="proportional")
-            logo_cells.append(logo_img)
+            _, _, pw, ph = _detect_image_meta(header_logo_bytes)
+            target_w = (34 * mm) if client_logo_bytes else (42 * mm)
+            target_h = target_w * (ph / pw)
+            header_logo_img = RLImage(io.BytesIO(header_logo_bytes), width=target_w, height=target_h, kind="proportional")
+            header_logo_img.hAlign = "RIGHT"
         except Exception:
-            pass
+            header_logo_img = None
 
+    date_lbl = "Data" if is_it else "Date"
     header_left = Paragraph(
-        f"<b>{_safe_para_text(mssp_name)}</b><br/><font size=8 color='#4b5563'>UrielScan Security Assessment</font>",
+        f"<b>{_safe_para_text(mssp_name)}</b><br/><font size=8 color='#4b5563'>{_safe_para_text(classification)} | {date_lbl}: {now_str}</font>",
         body_style,
     )
-    date_lbl = "Data" if is_it else "Date"
-    header_right = Paragraph(
-        f"<b>{_safe_para_text(classification)}</b><br/><font size=8 color='#4b5563'>{date_lbl}: {now_str}</font>",
-        ParagraphStyle("HdrRight", parent=body_style, alignment=2),
-    )
-    if logo_cells:
-        hdr_table = Table([[logo_cells[0], header_left, header_right]], colWidths=[30 * mm, 90 * mm, 60 * mm])
+    if header_logo_img is not None:
+        right_cell: Any = header_logo_img
     else:
-        hdr_table = Table([[header_left, header_right]], colWidths=[115 * mm, 65 * mm])
+        right_cell = Paragraph(
+            "<b>URIELSCAN</b>",
+            ParagraphStyle("HdrRightFallback", parent=body_style, alignment=2),
+        )
+
+    hdr_table = Table([[header_left, right_cell]], colWidths=[128 * mm, 52 * mm])
     hdr_table.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (-1, 0), (-1, 0), "RIGHT"),
         ("LINEBELOW", (0, 0), (-1, -1), 1, colors.HexColor("#1e3a5f")),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
@@ -520,7 +592,20 @@ def generate_docx_report(
     Generates an editable OpenXML (.docx) report compatible with Microsoft Word,
     LibreOffice Writer, and Google Docs without requiring external libraries.
     """
+    findings = sort_findings_by_severity(findings)
     is_it = (lang or "").lower().startswith("it")
+    client_logo_bytes = _decode_data_url_image(client_org.get("logo_data") or client_org.get("logo_url") or "")
+    if client_logo_bytes:
+        logo_bytes: Optional[bytes] = client_logo_bytes
+        logo_ext, logo_mime, logo_pw, logo_ph = _detect_image_meta(client_logo_bytes)
+        media_name = f"org_logo.{logo_ext}"
+        logo_doc_name = "OrganizationLogo"
+    else:
+        logo_bytes = _load_urielscan_logo_bytes()
+        logo_ext, logo_mime = "png", "image/png"
+        logo_pw, logo_ph = _png_dimensions(logo_bytes) if logo_bytes else (400, 76)
+        media_name = "urielscan_logo.png"
+        logo_doc_name = "UrielScanLogo"
 
     def p_xml(text: str, bold: bool = False, size_half_pt: int = 21, color_hex: str = "1F2937", space_after: int = 100) -> str:
         b_tag = "<w:b/>" if bold else ""
@@ -579,9 +664,41 @@ def generate_docx_report(
     client_cname = client_org.get("contact_name") or na_str
     client_cmail = client_org.get("contact_email") or na_str
 
+    header_meta_txt = f"{mssp_name}  |  {classification}  |  {now_str}"
+    top_header_parts: List[str] = []
+    if logo_bytes:
+        cx = 1350000 if client_logo_bytes else 1620000
+        cy = max(1, int(cx * (logo_ph / max(1, logo_pw))))
+        logo_drawing = (
+            '<w:p><w:pPr><w:jc w:val="right"/><w:spacing w:after="40"/></w:pPr><w:r><w:drawing>'
+            '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+            f'<wp:extent cx="{cx}" cy="{cy}"/>'
+            f'<wp:docPr id="1" name="{logo_doc_name}"/>'
+            '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+            '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            '<pic:pic>'
+            f'<pic:nvPicPr><pic:cNvPr id="1" name="{media_name}"/><pic:cNvPicPr/></pic:nvPicPr>'
+            '<pic:blipFill><a:blip r:embed="rIdLogo"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+            f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+            '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>'
+        )
+        left_p = p_xml(header_meta_txt, bold=True, size_half_pt=18, color_hex="4B5563", space_after=40)
+        hdr_tbl = (
+            '<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>'
+            '<w:tblBorders><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="single" w:sz="6" w:space="0" w:color="1E3A5F"/>'
+            '<w:right w:val="none"/><w:insideH w:val="none"/><w:insideV w:val="none"/></w:tblBorders>'
+            '</w:tblPr><w:tr>'
+            f'<w:tc><w:tcPr><w:tcW w:w="3400" w:type="pct"/><w:vAlign w:val="center"/></w:tcPr>{left_p}</w:tc>'
+            f'<w:tc><w:tcPr><w:tcW w:w="1600" w:type="pct"/><w:vAlign w:val="center"/></w:tcPr>{logo_drawing}</w:tc>'
+            '</w:tr></w:tbl>'
+        )
+        top_header_parts = [hdr_tbl, p_xml("", space_after=80)]
+    else:
+        top_header_parts = [p_xml(header_meta_txt, bold=True, size_half_pt=18, color_hex="4B5563", space_after=80)]
+
     if is_it:
-        body_parts: List[str] = [
-            p_xml(f"{mssp_name}  |  {classification}  |  {now_str}", bold=True, size_half_pt=18, color_hex="4B5563", space_after=80),
+        body_parts: List[str] = top_header_parts + [
             heading_xml(report_title, level=1),
             p_xml(f"Organizzazione Cliente: {client_name} ({client_ind})", bold=True, size_half_pt=20),
             p_xml(f"Referente: {client_cname} ({client_cmail})"),
@@ -591,8 +708,7 @@ def generate_docx_report(
         ]
         kpi_cols = ["Critiche", "Alte", "Medie", "Basse", "Info", "Totale Finding"]
     else:
-        body_parts: List[str] = [
-            p_xml(f"{mssp_name}  |  {classification}  |  {now_str}", bold=True, size_half_pt=18, color_hex="4B5563", space_after=80),
+        body_parts: List[str] = top_header_parts + [
             heading_xml(report_title, level=1),
             p_xml(f"Client Organization: {client_name} ({client_ind})", bold=True, size_half_pt=20),
             p_xml(f"Contact Person: {client_cname} ({client_cmail})"),
@@ -711,18 +827,27 @@ def generate_docx_report(
     body_parts.append(p_xml("", space_after=120))
     body_parts.append(p_xml(f"{footer_txt}  |  {sig_lbl}: ___________________________", size_half_pt=18, color_hex="4B5563"))
 
+    doc_ns = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"'
+    )
     document_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:document {doc_ns}>'
         f'<w:body>{"".join(body_parts)}<w:sectPr/></w:body>'
         '</w:document>'
     )
 
+    img_ct = f'<Default Extension="{logo_ext}" ContentType="{logo_mime}"/>' if logo_bytes else ""
     content_types_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
+        f'{img_ct}'
         '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
         '</Types>'
     )
@@ -734,9 +859,19 @@ def generate_docx_report(
         '</Relationships>'
     )
 
+    doc_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/{media_name}"/>'
+        '</Relationships>'
+    )
+
     out_buf = io.BytesIO()
     with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", content_types_xml)
         zf.writestr("_rels/.rels", rels_xml)
         zf.writestr("word/document.xml", document_xml)
+        if logo_bytes:
+            zf.writestr("word/_rels/document.xml.rels", doc_rels_xml)
+            zf.writestr(f"word/media/{media_name}", logo_bytes)
     return out_buf.getvalue()

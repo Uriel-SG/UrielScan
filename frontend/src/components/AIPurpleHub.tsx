@@ -1,19 +1,27 @@
-import React, { useState } from 'react';
-import { 
-  Sparkles, 
-  Flame, 
-  CheckCircle2, 
-  Layers, 
-  Code2, 
-  Copy, 
-  Check, 
-  RefreshCw, 
-  FileText, 
-  Send 
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Sparkles,
+  Flame,
+  CheckCircle2,
+  Layers,
+  Code2,
+  Copy,
+  Check,
+  RefreshCw,
+  FileText,
+  Send,
+  ChevronDown,
+  Clock,
+  List,
+  Trash2,
+  Eye,
+  ArrowLeft,
+  Search,
+  Download
 } from 'lucide-react';
-import { Scan, Finding } from '../types';
+import { Scan, Finding, SavedAIReport } from '../types';
 import { api } from '../services/api';
-import { useToast } from './UIFeedback';
+import { useToast, ConfirmModal } from './UIFeedback';
 import { useI18n } from '../i18n/LanguageContext';
 
 interface AIPurpleHubProps {
@@ -29,7 +37,7 @@ export const AIPurpleHub: React.FC<AIPurpleHubProps> = ({
   selectedScanId,
   onNavigateToReport,
 }) => {
-  const { lang, L } = useI18n();
+  const { lang, locale, L } = useI18n();
   const { showToast } = useToast();
   const [scanId, setScanId] = useState<string>(selectedScanId || scans[0]?.id || '');
   const [analysisMode, setAnalysisMode] = useState<'purple' | 'red' | 'blue' | 'executive'>('purple');
@@ -37,6 +45,55 @@ export const AIPurpleHub: React.FC<AIPurpleHubProps> = ({
   const [extraPrompt, setExtraPrompt] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedScript, setCopiedScript] = useState<boolean>(false);
+
+  const [savedAiReports, setSavedAiReports] = useState<SavedAIReport[]>([]);
+  const [activeSavedReport, setActiveSavedReport] = useState<SavedAIReport | null>(null);
+  const [isDropdownOpen, setIsDropdownOpen] = useState<boolean>(false);
+  const [showAllAiReports, setShowAllAiReports] = useState<boolean>(false);
+  const [aiSearch, setAiSearch] = useState<string>('');
+  const [aiToDelete, setAiToDelete] = useState<SavedAIReport | null>(null);
+  const [isDeletingAi, setIsDeletingAi] = useState<boolean>(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const loadAiReports = async () => {
+    try {
+      const rows = await api.getAiReports();
+      setSavedAiReports(rows);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    loadAiReports();
+  }, []);
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  const formatAiDate = (iso?: string) => {
+    if (!iso) return L('N/A', 'N/D');
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return L('N/A', 'N/D');
+    return `${d.toLocaleDateString(locale)} • ${d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}`;
+  };
+
+  const downloadMarkdownReport = (rep: SavedAIReport) => {
+    const blob = new Blob([rep.content_md || ''], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${rep.id}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const [analysisResult, setAnalysisResult] = useState<{
     executive_summary: string;
@@ -68,7 +125,9 @@ export const AIPurpleHub: React.FC<AIPurpleHubProps> = ({
       });
 
       setAnalysisResult(result);
-      showToast(L('Purple Team analysis generated successfully.', 'Analisi Purple Team generata con successo.'), 'success');
+      setActiveSavedReport(null);
+      await loadAiReports();
+      showToast(L('Purple Team analysis saved & generated successfully.', 'Analisi Purple Team salvata e generata con successo.'), 'success');
     } catch (err: any) {
       showToast(err.message || L('Error generating AI analysis.', 'Errore durante la generazione dell\'analisi AI.'), 'error');
     } finally {
@@ -83,36 +142,302 @@ export const AIPurpleHub: React.FC<AIPurpleHubProps> = ({
     showToast(L('Mitigation script copied.', 'Script di mitigazione copiato.'), 'info');
   };
 
+  if (showAllAiReports) {
+    const filteredAi = savedAiReports.filter((r) => {
+      if (!aiSearch.trim()) return true;
+      const q = aiSearch.toLowerCase();
+      return (
+        r.title.toLowerCase().includes(q) ||
+        (r.org_name || '').toLowerCase().includes(q) ||
+        (r.mode || '').toLowerCase().includes(q) ||
+        (r.model_used || '').toLowerCase().includes(q)
+      );
+    });
+
+    return (
+      <div className="space-y-4">
+        <div className="card-industrial p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center space-x-2 text-[10px] font-mono uppercase font-bold tracking-wider text-theme-accent">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{L('AI Purple Analyst Archive', 'Archivio Report AI Purple Analyst')}</span>
+            </div>
+            <h1 className="text-base font-bold text-theme-primary tracking-tight mt-0.5">
+              {L('All Saved AI Reports', 'Tutti i Report AI Salvati')} ({savedAiReports.length})
+            </h1>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-theme-muted absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={aiSearch}
+                onChange={(e) => setAiSearch(e.target.value)}
+                placeholder={L('Filter by title, mode, org...', 'Filtra per titolo, mode, org...')}
+                className="input-industrial pl-8 pr-3 py-1.5 text-xs w-56"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAllAiReports(false)}
+              className="btn-secondary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>{L('Back to AI Hub', 'Torna ad AI Hub')}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="card-industrial overflow-hidden">
+          {filteredAi.length === 0 ? (
+            <div className="p-8 text-center text-xs text-theme-muted">
+              {L('No saved AI analyses found.', 'Nessun report AI salvato trovato.')}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-theme bg-subtle text-[10px] font-mono uppercase text-theme-secondary">
+                    <th className="py-2.5 px-3">{L('Mode / Scope', 'Modalità / Scope')}</th>
+                    <th className="py-2.5 px-3">{L('Report Title', 'Titolo Report')}</th>
+                    <th className="py-2.5 px-3">{L('Organization', 'Organizzazione')}</th>
+                    <th className="py-2.5 px-3">{L('Generated At', 'Data & Ora')}</th>
+                    <th className="py-2.5 px-3 text-right">{L('Actions', 'Azioni')}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-theme-subtle text-xs">
+                  {filteredAi.map((rep) => (
+                    <tr key={rep.id} className="hover:bg-subtle/60 transition">
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border border-theme bg-panel text-theme-accent uppercase">
+                          {rep.mode}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 font-medium text-theme-primary max-w-md truncate" title={rep.title}>
+                        {rep.title}
+                      </td>
+                      <td className="py-2.5 px-3 text-theme-secondary">{rep.org_name || `Org #${rep.org_id}`}</td>
+                      <td className="py-2.5 px-3 font-mono text-[11px] text-theme-muted">
+                        {formatAiDate(rep.created_at)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right space-x-1.5 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveSavedReport(rep);
+                            setShowAllAiReports(false);
+                          }}
+                          className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center space-x-1"
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span>{L('View', 'Vedi')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadMarkdownReport(rep)}
+                          className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center"
+                          title={L('Download Markdown (.md)', 'Scarica Markdown (.md)')}
+                        >
+                          <Download className="w-3 h-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAiToDelete(rep)}
+                          className="btn-secondary px-2 py-1 text-[11px] text-red-400 hover:border-red-500/60 inline-flex items-center"
+                          title={L('Delete AI Report', 'Elimina Report AI')}
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <ConfirmModal
+          isOpen={Boolean(aiToDelete)}
+          title={L('Delete AI Analysis Report', 'Elimina Report Analisi AI')}
+          description={L(
+            `Are you sure you want to permanently delete "${aiToDelete?.title || ''}"?`,
+            `Sei sicuro di voler eliminare definitivamente "${aiToDelete?.title || ''}"?`
+          )}
+          confirmText={L('Delete', 'Elimina')}
+          isDestructive={true}
+          isLoading={isDeletingAi}
+          onCancel={() => setAiToDelete(null)}
+          onConfirm={async () => {
+            if (!aiToDelete) return;
+            setIsDeletingAi(true);
+            try {
+              const ok = await api.deleteAiReport(aiToDelete.id);
+              if (ok) {
+                setSavedAiReports((prev) => prev.filter((item) => item.id !== aiToDelete.id));
+                if (activeSavedReport?.id === aiToDelete.id) {
+                  setActiveSavedReport(null);
+                }
+                showToast(L('AI report deleted.', 'Report AI eliminato.'), 'success');
+              }
+            } finally {
+              setIsDeletingAi(false);
+              setAiToDelete(null);
+            }
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="card-industrial p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div className="space-y-0.5">
-          <div className="flex items-center space-x-2 text-[11px] uppercase font-bold tracking-wider text-theme-accent">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>AI Purple Team Analyst & Correlation Hub</span>
+      <div className="card-industrial p-4 space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <div className="flex items-center space-x-2 text-[11px] uppercase font-bold tracking-wider text-theme-accent">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>AI Purple Team Analyst & Correlation Hub</span>
+            </div>
+            <h1 className="text-base font-bold text-theme-primary tracking-tight">
+              {L('Purple Team Offensive & Defensive Analyzer', 'Analizzatore Offensivo & Difensivo Purple Team')}
+            </h1>
+            <p className="text-xs text-theme-secondary">
+              {L(
+                'Automatic correlation of exploit chains (Red Team) and prioritized generation of fixes and scripts (Blue Team).',
+                'Correlazione automatica di exploit chains (Red Team) e generazione prioritaria di fix e script (Blue Team).'
+              )}
+            </p>
           </div>
-          <h1 className="text-base font-bold text-theme-primary tracking-tight">
-            {L('Purple Team Offensive & Defensive Analyzer', 'Analizzatore Offensivo & Difensivo Purple Team')}
-          </h1>
-          <p className="text-xs text-theme-secondary">
-            {L(
-              'Automatic correlation of exploit chains (Red Team) and prioritized generation of fixes and scripts (Blue Team).',
-              'Correlazione automatica di exploit chains (Red Team) e generazione prioritaria di fix e script (Blue Team).'
-            )}
-          </p>
+
+          {analysisResult && (
+            <button
+              onClick={onNavigateToReport}
+              className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
+            >
+              <FileText className="w-3.5 h-3.5 text-theme-accent" />
+              <span>{L('Export to Report', 'Esporta in Report')}</span>
+            </button>
+          )}
         </div>
 
-        {analysisResult && (
+        {/* Saved AI Reports Quick Switcher & "View all" */}
+        <div className="pt-3 border-t border-theme-subtle flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-mono uppercase font-bold tracking-wider text-theme-muted flex items-center space-x-1">
+              <Clock className="w-3 h-3 text-theme-accent" />
+              <span>{L('Saved AI Reports', 'Report AI Salvati')}</span>
+            </span>
+
+            <div className="relative" ref={dropdownRef}>
+              <button
+                type="button"
+                onClick={() => setIsDropdownOpen((prev) => !prev)}
+                className="input-industrial px-2.5 py-1 text-left flex items-center justify-between gap-3 min-w-[260px] max-w-[430px]"
+              >
+                <div className="min-w-0">
+                  {activeSavedReport ? (
+                    <>
+                      <div className="text-xs font-semibold text-theme-primary truncate">
+                        {activeSavedReport.title}
+                      </div>
+                      <div className="text-[10px] font-mono text-theme-muted truncate">
+                        {formatAiDate(activeSavedReport.created_at)} • {activeSavedReport.model_used || 'local'}
+                      </div>
+                    </>
+                  ) : savedAiReports.length > 0 ? (
+                    <>
+                      <div className="text-xs font-semibold text-theme-primary truncate">
+                        {savedAiReports[0].title}
+                      </div>
+                      <div className="text-[10px] font-mono text-theme-muted truncate">
+                        {formatAiDate(savedAiReports[0].created_at)} • {savedAiReports[0].org_name || `Org #${savedAiReports[0].org_id}`}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-theme-muted py-0.5">
+                      {L('No saved AI analyses yet', 'Nessuna analisi AI salvata finora')}
+                    </div>
+                  )}
+                </div>
+                <ChevronDown className={`w-3.5 h-3.5 text-theme-muted shrink-0 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isDropdownOpen && savedAiReports.length > 0 && (
+                <div className="absolute left-0 top-full mt-1 w-96 bg-panel border border-theme rounded shadow-xl z-50 max-h-72 overflow-y-auto py-1">
+                  {savedAiReports.map((rep) => (
+                    <button
+                      key={rep.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveSavedReport(rep);
+                        setIsDropdownOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left hover:bg-hover transition border-b border-theme-subtle last:border-b-0 cursor-pointer ${
+                        activeSavedReport?.id === rep.id ? 'bg-subtle text-theme-accent' : ''
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-theme-primary truncate">{rep.title}</span>
+                        <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-accent uppercase shrink-0">
+                          {rep.mode}
+                        </span>
+                      </div>
+                      <div className="text-[10px] font-mono text-theme-muted mt-0.5 truncate">
+                        {formatAiDate(rep.created_at)} • {rep.org_name || `Org #${rep.org_id}`}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           <button
-            onClick={onNavigateToReport}
-            className="btn-secondary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold"
+            type="button"
+            onClick={() => setShowAllAiReports(true)}
+            className="btn-secondary px-2.5 py-1.5 text-xs font-semibold flex items-center space-x-1.5"
           >
-            <FileText className="w-3.5 h-3.5 text-theme-accent" />
-            <span>{L('Export to Report', 'Esporta in Report')}</span>
+            <List className="w-3.5 h-3.5 text-theme-accent" />
+            <span>{L('View all', 'Vedi tutti')} ({savedAiReports.length})</span>
           </button>
-        )}
+        </div>
       </div>
+
+      {activeSavedReport && (
+        <div className="card-industrial p-4 space-y-3 border-l-4 border-l-theme-accent">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-theme-subtle pb-2">
+            <div>
+              <div className="text-xs font-bold text-theme-primary">{activeSavedReport.title}</div>
+              <div className="text-[10px] font-mono text-theme-muted">
+                {formatAiDate(activeSavedReport.created_at)} • {activeSavedReport.org_name || `Org #${activeSavedReport.org_id}`} • {activeSavedReport.model_used || 'local'}
+              </div>
+            </div>
+            <div className="flex items-center space-x-1.5">
+              <button
+                type="button"
+                onClick={() => downloadMarkdownReport(activeSavedReport)}
+                className="btn-secondary px-2.5 py-1 text-xs flex items-center space-x-1"
+              >
+                <Download className="w-3 h-3" />
+                <span>.MD</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSavedReport(null)}
+                className="btn-secondary px-2.5 py-1 text-xs"
+              >
+                {L('Close', 'Chiudi')}
+              </button>
+            </div>
+          </div>
+          <pre className="p-3 rounded bg-canvas border border-theme text-xs font-mono text-theme-primary overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-96 overflow-y-auto">
+            {activeSavedReport.content_md}
+          </pre>
+        </div>
+      )}
 
       {/* Control Panel */}
       <div className="card-industrial p-4 space-y-3">

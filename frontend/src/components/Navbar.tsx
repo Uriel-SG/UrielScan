@@ -1,16 +1,14 @@
-import React from 'react';
-import { 
-  ShieldCheck, 
-  Building2, 
-  ChevronDown, 
-  PlusCircle, 
-  LogOut, 
-  User, 
-  Palette, 
-  Terminal, 
-  Sun, 
-  Moon,
-  Languages 
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Building2,
+  ChevronDown,
+  PlusCircle,
+  LogOut,
+  User,
+  Palette,
+  Cpu,
+  Check,
+  Languages,
 } from 'lucide-react';
 import { Organization, ScannerProfile, EngineStatus, AuthUser } from '../types';
 import { useI18n } from '../i18n/LanguageContext';
@@ -30,11 +28,17 @@ interface NavbarProps {
   onThemeChange: (theme: PortalTheme) => void;
 }
 
+const THEME_OPTIONS: Array<{ id: PortalTheme; label: string; swatch: string }> = [
+  { id: 'uriel-ops', label: 'Uriel Ops', swatch: 'bg-violet-500' },
+  { id: 'phosphor-ops', label: 'Phosphor Ops', swatch: 'bg-emerald-400' },
+  { id: 'foundry-dark', label: 'Carbon Tactical', swatch: 'bg-sky-500' },
+  { id: 'swiss-light', label: 'Swiss Editorial', swatch: 'bg-zinc-200 border border-zinc-400' },
+];
+
 export const Navbar: React.FC<NavbarProps> = ({
   selectedOrgId,
   onSelectOrg,
   organizations,
-  scannerProfile,
   engineStatus,
   onNewScanClick,
   currentUser,
@@ -43,105 +47,222 @@ export const Navbar: React.FC<NavbarProps> = ({
   onThemeChange,
 }) => {
   const { lang, setLang, L } = useI18n();
-  const selectedOrg = organizations.find((o) => o.id === selectedOrgId);
+  const [openMenu, setOpenMenu] = useState<'org' | 'engines' | 'theme' | null>(null);
+  const headerRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (headerRef.current && !headerRef.current.contains(e.target as Node)) {
+        setOpenMenu(null);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenu(null);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+  const selectedOrg = organizations.find((o) => String(o.id) === String(selectedOrgId));
+  const currentThemeObj = THEME_OPTIONS.find((t) => t.id === currentTheme) || THEME_OPTIONS[0];
+
+  const enginesList = [
+    {
+      id: 'nmap',
+      name: 'Nmap',
+      active: Boolean(engineStatus.nmap?.available),
+      meta: `${engineStatus.nmap?.scripts_count ?? 0} NSE`,
+    },
+    {
+      id: 'nuclei',
+      name: 'Nuclei',
+      active: Boolean(engineStatus.nuclei?.available),
+      meta: engineStatus.nuclei?.version || 'Templates',
+    },
+    {
+      id: 'zap',
+      name: 'OWASP ZAP',
+      active: Boolean(engineStatus.zap?.available),
+      meta: engineStatus.zap?.version || 'Web App',
+    },
+    {
+      id: 'native',
+      name: 'Native',
+      active: Boolean(engineStatus.native?.available),
+      meta: 'NET+WEB',
+    },
+  ];
+
+  const activeEnginesCount = enginesList.filter((e) => e.active).length;
+  const aggregateLedClass =
+    activeEnginesCount === enginesList.length
+      ? 'bg-emerald-500'
+      : activeEnginesCount > 0
+      ? 'bg-amber-500'
+      : 'bg-red-500';
 
   return (
-    <header className="sticky top-0 z-40 w-full h-14 bg-panel border-b border-theme px-4 lg:px-6 flex items-center justify-between gap-2">
-      {/* Left: Branding & Organization Selector */}
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-40 w-full h-14 shrink-0 bg-panel border-b border-theme px-4 lg:px-6 flex items-center justify-between gap-2"
+    >
+      {/* Left: Logo + Organization Dropdown (directly after logo) */}
       <div className="flex items-center space-x-3 min-w-0">
-        <div className="flex items-center space-x-2.5 shrink-0">
-          <img
-            src={`/urielscan-header-${currentTheme}.png`}
-            alt="UrielScan"
-            className="h-9 w-auto object-contain select-none transition-all duration-200 shrink-0"
-          />
-          <div className="hidden sm:flex flex-col justify-center border-l border-theme-subtle pl-2.5 shrink-0">
-            <div className="flex items-center space-x-1.5">
-              <span className="text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded border border-theme-subtle bg-subtle text-theme-accent uppercase tracking-wider whitespace-nowrap">
-                Console Ops
-              </span>
-            </div>
-            <p className="text-[10px] text-theme-muted truncate max-w-[150px] leading-tight mt-0.5">
-              {scannerProfile.company_name || 'Purple Team MSSP'}
-            </p>
-          </div>
-        </div>
+        <img
+          src={`/urielscan-header-${currentTheme}.png`}
+          alt="UrielScan"
+          className="h-9 w-auto object-contain select-none transition-all duration-200 shrink-0"
+        />
 
-        {/* Divider */}
-        <div className="hidden md:block h-5 w-px bg-theme-subtle shrink-0" />
-
-        {/* Organization Tenant Selector */}
-        <div className="relative group min-w-0">
-          <div className="flex items-center space-x-2 bg-subtle hover:bg-hover border border-theme rounded px-2.5 py-1 text-xs text-theme-primary transition cursor-pointer">
+        {/* Custom Themed Organization Tenant Dropdown */}
+        <div className="relative min-w-0">
+          <button
+            type="button"
+            onClick={() => setOpenMenu((m) => (m === 'org' ? null : 'org'))}
+            className="flex items-center space-x-2 bg-subtle hover:bg-hover border border-theme rounded px-2.5 py-1.5 text-xs text-theme-primary transition cursor-pointer max-w-[230px]"
+            title={
+              selectedOrg
+                ? `${selectedOrg.name} — Scope: ${selectedOrg.target_scope || 'N/A'}`
+                : L('All Organizations (Global MSP)', 'Tutte le Organizzazioni (Global MSP)')
+            }
+          >
             <Building2 className="w-3.5 h-3.5 text-theme-secondary shrink-0" />
-            <select
-              value={selectedOrgId}
-              onChange={(e) => onSelectOrg(e.target.value)}
-              className="bg-transparent text-theme-primary text-xs font-medium focus:outline-none cursor-pointer pr-4 appearance-none max-w-[175px] xl:max-w-[230px] truncate"
-            >
-              <option value="ALL" className="bg-panel text-theme-primary">
-                {L('All Organizations (Global MSP)', 'Tutte le Organizzazioni (Global MSP)')}
-              </option>
-              {organizations.map((org) => (
-                <option key={org.id} value={org.id} className="bg-panel text-theme-primary">
-                  {org.name} ({org.industry})
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-3 h-3 text-theme-muted pointer-events-none absolute right-2" />
-          </div>
-          {selectedOrg && (
-            <div className="absolute left-0 top-full mt-1 hidden group-hover:flex items-center space-x-2 px-2.5 py-1 card-industrial text-[11px] text-theme-secondary shadow-lg whitespace-nowrap z-50">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>Scope: {selectedOrg.target_scope}</span>
+            <span className="font-medium truncate">
+              {selectedOrg
+                ? `${selectedOrg.name} (${selectedOrg.industry})`
+                : L('All Organizations', 'Tutte le Organizzazioni')}
+            </span>
+            <ChevronDown
+              className={`w-3 h-3 text-theme-muted shrink-0 transition-transform ${
+                openMenu === 'org' ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+
+          {openMenu === 'org' && (
+            <div className="absolute left-0 top-full mt-1.5 w-72 bg-panel border border-theme rounded shadow-xl z-50 py-1 text-xs max-h-80 overflow-y-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectOrg('ALL');
+                  setOpenMenu(null);
+                }}
+                className={`w-full px-3 py-2 text-left flex items-center justify-between hover:bg-hover transition cursor-pointer ${
+                  selectedOrgId === 'ALL'
+                    ? 'bg-subtle text-theme-accent font-semibold'
+                    : 'text-theme-primary'
+                }`}
+              >
+                <span className="truncate">
+                  {L('All Organizations (Global MSP)', 'Tutte le Organizzazioni (Global MSP)')}
+                </span>
+                {selectedOrgId === 'ALL' && <Check className="w-3.5 h-3.5 shrink-0 ml-2" />}
+              </button>
+
+              {organizations.length > 0 && <div className="border-t border-theme-subtle my-1" />}
+
+              {organizations.map((org) => {
+                const isSelected = String(org.id) === String(selectedOrgId);
+                return (
+                  <button
+                    key={org.id}
+                    type="button"
+                    onClick={() => {
+                      onSelectOrg(String(org.id));
+                      setOpenMenu(null);
+                    }}
+                    className={`w-full px-3 py-2 text-left flex items-center justify-between hover:bg-hover transition cursor-pointer ${
+                      isSelected
+                        ? 'bg-subtle text-theme-accent font-semibold'
+                        : 'text-theme-primary'
+                    }`}
+                  >
+                    <div className="min-w-0 pr-2">
+                      <div className="truncate">
+                        {org.name}{' '}
+                        <span className="text-theme-muted font-normal">({org.industry})</span>
+                      </div>
+                      {org.target_scope && (
+                        <div className="text-[10px] font-mono text-theme-muted truncate">
+                          {org.target_scope}
+                        </div>
+                      )}
+                    </div>
+                    {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
       </div>
 
-      {/* Center: Live Engine Indicators */}
-      <div className="hidden xl:flex items-center space-x-2 text-[11px] font-mono shrink-0">
-        {/* Nmap Engine */}
-        <div 
-          className="flex items-center space-x-1.5 px-2 py-0.5 rounded border border-theme bg-subtle whitespace-nowrap"
-          title={`Nmap Engine: ${engineStatus.nmap.scripts_count} ${L('scripts', 'script')}`}
+      {/* Center: Unified Engines Dropdown with 3-Color Aggregate LED */}
+      <div className="hidden md:flex items-center relative shrink-0">
+        <button
+          type="button"
+          onClick={() => setOpenMenu((m) => (m === 'engines' ? null : 'engines'))}
+          className="flex items-center space-x-2 px-2.5 py-1.5 rounded border border-theme bg-subtle hover:bg-hover text-xs font-mono text-theme-primary transition cursor-pointer whitespace-nowrap"
+          title={L('Click to view scanner engine status', 'Clicca per vedere lo stato dei motori di scansione')}
         >
-          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${engineStatus.nmap.available ? 'bg-emerald-500' : 'bg-red-500'}`} />
-          <span className="text-theme-muted">NMAP:</span>
-          <span className="text-theme-primary font-semibold">
-            {engineStatus.nmap.available ? L('ACTIVE', 'ATTIVO') : L('MISSING', 'ASSENTE')}
+          <span className={`w-2 h-2 rounded-full shrink-0 ${aggregateLedClass}`} />
+          <Cpu className="w-3.5 h-3.5 text-theme-secondary shrink-0" />
+          <span className="font-semibold tracking-tight">{L('Engines', 'Motori')}</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel border border-theme-subtle text-theme-secondary">
+            {activeEnginesCount}/{enginesList.length}
           </span>
-          <span className="text-[10px] px-1 rounded bg-panel border border-theme-subtle text-theme-secondary whitespace-nowrap">
-            {engineStatus.nmap.scripts_count} NSE
-          </span>
-        </div>
+          <ChevronDown
+            className={`w-3 h-3 text-theme-muted shrink-0 transition-transform ${
+              openMenu === 'engines' ? 'rotate-180' : ''
+            }`}
+          />
+        </button>
 
-        {/* Nuclei Engine */}
-        <div 
-          className="flex items-center space-x-1.5 px-2 py-0.5 rounded border border-theme bg-subtle whitespace-nowrap"
-          title={L('Nuclei Vulnerability Engine', 'Motore Vulnerabilità Nuclei')}
-        >
-          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${engineStatus.nuclei.available ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-          <span className="text-theme-muted">NUCLEI:</span>
-          <span className="text-theme-primary font-semibold">
-            {engineStatus.nuclei.available ? L('ACTIVE', 'ATTIVO') : L('UNAVAILABLE', 'NON DISP.')}
-          </span>
-        </div>
-
-        {/* Native Engine */}
-        <div 
-          className="flex items-center space-x-1.5 px-2 py-0.5 rounded border border-theme bg-subtle whitespace-nowrap"
-          title={L('Uriel Native Asynchronous Probe', 'Sonda Asincrona Nativa Uriel')}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-          <span className="text-theme-muted">NATIVE:</span>
-          <span className="text-theme-primary font-semibold">NET+WEB</span>
-        </div>
+        {openMenu === 'engines' && (
+          <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 w-72 bg-panel border border-theme rounded shadow-xl z-50 p-1.5 space-y-1 text-xs">
+            <div className="px-2 py-1 text-[10px] font-mono font-bold uppercase tracking-wider text-theme-muted border-b border-theme-subtle flex items-center justify-between">
+              <span>{L('Scanner Engines', 'Motori di Scansione')}</span>
+              <span className="text-theme-secondary">
+                {activeEnginesCount}/{enginesList.length} {L('ONLINE', 'ATTIVI')}
+              </span>
+            </div>
+            {enginesList.map((eng) => (
+              <div
+                key={eng.id}
+                className="flex items-center justify-between px-2.5 py-1.5 rounded bg-subtle/60 border border-theme-subtle"
+              >
+                <div className="flex items-center space-x-2 min-w-0">
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      eng.active ? 'bg-emerald-500' : 'bg-red-500'
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-theme-primary truncate">{eng.name}</div>
+                    <div className="text-[10px] font-mono text-theme-muted truncate">{eng.meta}</div>
+                  </div>
+                </div>
+                <span
+                  className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                    eng.active
+                      ? 'bg-emerald-950/30 border-emerald-600/50 text-emerald-400'
+                      : 'bg-red-950/30 border-red-600/50 text-red-400'
+                  }`}
+                >
+                  {eng.active ? L('ACTIVE', 'ATTIVO') : L('MISSING', 'ASSENTE')}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Right: Actions, Theme Switcher, Language Toggle & User Profile */}
-      <div className="flex items-center space-x-2.5 shrink-0">
-        {/* New Scan Action Button */}
+      {/* Right: Actions, Language Toggle, Custom Theme Popover & User Profile */}
+      <div className="flex items-center space-x-2 shrink-0">
         <button
           onClick={onNewScanClick}
           className="btn-primary flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold shadow-sm whitespace-nowrap shrink-0"
@@ -161,7 +282,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ? 'bg-theme-accent text-white'
                 : 'text-theme-muted hover:text-theme-primary'
             }`}
-            title={L('Switch to English', 'Passa all\'Inglese')}
+            title={L('Switch to English', "Passa all'Inglese")}
           >
             EN
           </button>
@@ -174,48 +295,73 @@ export const Navbar: React.FC<NavbarProps> = ({
                 ? 'bg-theme-accent text-white'
                 : 'text-theme-muted hover:text-theme-primary'
             }`}
-            title={L('Switch to Italian', 'Passa all\'Italiano')}
+            title={L('Switch to Italian', "Passa all'Italiano")}
           >
             IT
           </button>
         </div>
 
-        {/* Theme Selector */}
-        <div className="relative flex items-center bg-subtle border border-theme rounded px-2 py-1 text-xs whitespace-nowrap shrink-0">
-          <Palette className="w-3.5 h-3.5 text-theme-secondary mr-1.5 shrink-0" />
-          <select
-            value={currentTheme}
-            onChange={(e) => onThemeChange(e.target.value as PortalTheme)}
-            className="bg-transparent text-theme-primary text-xs font-medium focus:outline-none cursor-pointer appearance-none pr-3"
+        {/* Custom Themed Portal Theme Selector */}
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setOpenMenu((m) => (m === 'theme' ? null : 'theme'))}
+            className="flex items-center space-x-1.5 bg-subtle hover:bg-hover border border-theme rounded px-2.5 py-1.5 text-xs text-theme-primary transition cursor-pointer whitespace-nowrap"
             title={L('Select Industrial Theme', 'Seleziona Tema Industriale')}
           >
-            <option value="uriel-ops" className="bg-panel text-theme-primary">
-              Uriel Ops
-            </option>
-            <option value="phosphor-ops" className="bg-panel text-theme-primary">
-              Phosphor Ops
-            </option>
-            <option value="foundry-dark" className="bg-panel text-theme-primary">
-              Carbon Tactical
-            </option>
-            <option value="swiss-light" className="bg-panel text-theme-primary">
-              Swiss Editorial
-            </option>
-          </select>
-          <ChevronDown className="w-3 h-3 text-theme-muted pointer-events-none absolute right-1.5" />
+            <Palette className="w-3.5 h-3.5 text-theme-secondary shrink-0" />
+            <span className="font-medium hidden sm:inline">{currentThemeObj.label}</span>
+            <ChevronDown
+              className={`w-3 h-3 text-theme-muted shrink-0 transition-transform ${
+                openMenu === 'theme' ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+
+          {openMenu === 'theme' && (
+            <div className="absolute right-0 top-full mt-1.5 w-48 bg-panel border border-theme rounded shadow-xl z-50 py-1 text-xs">
+              {THEME_OPTIONS.map((t) => {
+                const active = t.id === currentTheme;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => {
+                      onThemeChange(t.id);
+                      setOpenMenu(null);
+                    }}
+                    className={`w-full px-3 py-2 text-left flex items-center justify-between hover:bg-hover transition cursor-pointer ${
+                      active ? 'bg-subtle text-theme-accent font-semibold' : 'text-theme-primary'
+                    }`}
+                  >
+                    <span className="flex items-center space-x-2">
+                      <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${t.swatch}`} />
+                      <span>{t.label}</span>
+                    </span>
+                    {active && <Check className="w-3.5 h-3.5 shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Current User Badge & Logout */}
         {currentUser && (
           <div className="flex items-center space-x-1.5 pl-1 border-l border-theme-subtle">
-            <div 
+            <div
               className="flex items-center space-x-1.5 px-2 py-1 rounded bg-subtle border border-theme text-xs"
-              title={`${L('Authenticated user', 'Utente autenticato')}: ${currentUser.username} (2FA: ${currentUser.two_factor_enabled ? L('Active', 'Attivo') : L('Disabled', 'Disattivato')})`}
+              title={`${L('Authenticated user', 'Utente autenticato')}: ${currentUser.username} (2FA: ${
+                currentUser.two_factor_enabled ? L('Active', 'Attivo') : L('Disabled', 'Disattivato')
+              })`}
             >
               <User className="w-3.5 h-3.5 text-theme-secondary" />
               <span className="font-mono text-theme-primary font-medium">{currentUser.username}</span>
               {currentUser.two_factor_enabled && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title={L('2FA TOTP active', '2FA TOTP attivo')} />
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-500"
+                  title={L('2FA TOTP active', '2FA TOTP attivo')}
+                />
               )}
             </div>
 

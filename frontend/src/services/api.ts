@@ -11,7 +11,11 @@ import {
   LoginResponse,
   AuthUser,
   Setup2FAResponse,
-  RemoteAgent
+  RemoteAgent,
+  SavedReport,
+  SavedAIReport,
+  NatCheckResult,
+  ProbeInstallerPackage
 } from '../types';
 
 const API_BASE = '/api';
@@ -465,6 +469,11 @@ export const api = {
               available: Boolean(raw.engines.nuclei?.installed ?? raw.engines.nuclei?.available ?? false),
               version: raw.engines.nuclei?.version || undefined,
             },
+            zap: {
+              available: Boolean(raw.engines.zap?.installed ?? raw.engines.zap?.available ?? false),
+              version: raw.engines.zap?.version || undefined,
+              mode: raw.engines.zap?.mode || undefined,
+            },
             native: {
               available: true,
             },
@@ -483,6 +492,7 @@ export const api = {
     return {
       nmap: { available: false, version: 'Non rilevato', scripts_count: 0 },
       nuclei: { available: false },
+      zap: { available: false },
       native: { available: true },
       ai: { configured: false, provider: 'None', model: '' }
     };
@@ -570,6 +580,7 @@ export const api = {
     nuclei_tags?: string[];
     nuclei_severity?: string[];
     web_checks?: string[];
+    zap_mode?: 'baseline' | 'full';
   }): Promise<Scan> {
     const res = await fetch(`${API_BASE}/scans`, {
       method: 'POST',
@@ -851,6 +862,106 @@ export const api = {
       throw new Error(err.detail || 'Generazione report fallita');
     }
     await triggerBlobDownload(res, `urielscan_report_scan_${payload.scan_id}.${payload.format}`);
+  },
+
+  // Saved Reports Management
+  async getReports(orgId?: string): Promise<SavedReport[]> {
+    const url = orgId && orgId !== 'ALL' ? `${API_BASE}/reports?org_id=${encodeURIComponent(orgId)}` : `${API_BASE}/reports`;
+    const res = await fetch(url, { headers: getAuthHeaders(false) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  },
+
+  async deleteReport(reportId: string): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/reports/${encodeURIComponent(reportId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(false)
+    });
+    return res.ok;
+  },
+
+  async openSavedReport(reportId: string, download: boolean = false): Promise<void> {
+    const endpoint = download ? 'download' : 'view';
+    const res = await fetch(`${API_BASE}/reports/${encodeURIComponent(reportId)}/${endpoint}`, {
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Failed to open saved report');
+    }
+    const contentType = res.headers.get('Content-Type') || '';
+    const isDocx = contentType.includes('wordprocessingml');
+    if (download || isDocx) {
+      const ext = contentType.includes('pdf') ? 'pdf' : isDocx ? 'docx' : 'html';
+      await triggerBlobDownload(res, `${reportId}.${ext}`);
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  },
+
+  // Saved AI Purple Analyst Reports
+  async getAiReports(orgId?: string): Promise<SavedAIReport[]> {
+    const url = orgId && orgId !== 'ALL' ? `${API_BASE}/ai/reports?org_id=${encodeURIComponent(orgId)}` : `${API_BASE}/ai/reports`;
+    const res = await fetch(url, { headers: getAuthHeaders(false) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  },
+
+  async deleteAiReport(reportId: string): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/ai/reports/${encodeURIComponent(reportId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(false)
+    });
+    return res.ok;
+  },
+
+  // NAT Loopback Guard Check
+  async checkNatLoopback(targets: string): Promise<NatCheckResult> {
+    const res = await fetch(`${API_BASE}/network/nat-check?targets=${encodeURIComponent(targets)}`, {
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      return { egress_public_ip: null, has_nat_loopback: false, loopback_targets: [], details: [] };
+    }
+    return await res.json();
+  },
+
+  // Remote Probe Self-Contained Installers (.msi / .sh)
+  async downloadProbeInstaller(
+    agentId: string | number,
+    payload: { platform: 'windows_msi' | 'linux_sh'; server_url?: string; token?: string; insecure?: boolean }
+  ): Promise<void> {
+    const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(String(agentId))}/installer`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Installer generation failed' }));
+      throw new Error(err.detail || 'Installer generation failed');
+    }
+    const ext = payload.platform === 'windows_msi' ? 'msi' : 'sh';
+    await triggerBlobDownload(res, `urielscan-probe-${agentId}.${ext}`);
+  },
+
+  async createProbeInstallerLink(
+    agentId: string | number,
+    payload: { platform: 'windows_msi' | 'linux_sh'; server_url?: string; token?: string; insecure?: boolean }
+  ): Promise<ProbeInstallerPackage> {
+    const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(String(agentId))}/installer-link`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to prepare probe installer link' }));
+      throw new Error(err.detail || 'Failed to prepare probe installer link');
+    }
+    return await res.json();
   }
 };
 
