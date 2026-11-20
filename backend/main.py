@@ -165,6 +165,7 @@ class SettingsModel(BaseModel):
     report_footer: Optional[str] = None
     ai_provider: Optional[str] = None
     ai_api_key: Optional[str] = None
+    clear_ai_api_key: Optional[bool] = None
     ai_model: Optional[str] = None
     ai_base_url: Optional[str] = None
     # Frontend aliases
@@ -634,12 +635,27 @@ async def update_settings_endpoint(payload: SettingsModel):
     if "base_url" in raw and "ai_base_url" not in raw:
         raw["ai_base_url"] = raw.pop("base_url")
 
-    # Preserve stored AI key when UI submits blank or masked placeholder
-    incoming_key = str(raw.get("ai_api_key", ""))
-    if "ai_api_key" in raw and (incoming_key == "" or "..." in incoming_key or incoming_key == "****"):
-        raw.pop("ai_api_key", None)
+    clear_key = bool(raw.pop("clear_ai_api_key", False))
+    if clear_key:
+        raw["ai_api_key"] = ""
+    else:
+        # Preserve stored AI key when UI submits blank or masked placeholder
+        incoming_key = str(raw.get("ai_api_key", ""))
+        if "ai_api_key" in raw and (incoming_key == "" or "..." in incoming_key or incoming_key == "****"):
+            raw.pop("ai_api_key", None)
 
     update_settings(raw)
+    masked = _mask_settings(get_settings())
+    return {
+        "success": True,
+        "settings": masked,
+        **masked,
+    }
+
+
+@app.delete("/api/settings/ai-api-key")
+async def delete_ai_api_key_endpoint():
+    update_settings({"ai_api_key": ""})
     masked = _mask_settings(get_settings())
     return {
         "success": True,

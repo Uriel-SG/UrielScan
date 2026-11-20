@@ -90,10 +90,17 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
   // AI Configuration state
   const [aiProvider, setAiProvider] = useState<string>(scannerProfile.ai_provider);
   const [aiApiKey, setAiApiKey] = useState<string>(scannerProfile.ai_api_key || '');
+  const [hasSavedAiKey, setHasSavedAiKey] = useState<boolean>(Boolean(scannerProfile.ai_api_key_configured));
+  const [maskedAiKey, setMaskedAiKey] = useState<string>(scannerProfile.ai_api_key_masked || '');
   const [aiModel, setAiModel] = useState<string>(scannerProfile.ai_model);
   const [aiBaseUrl, setAiBaseUrl] = useState<string>(scannerProfile.ai_base_url || '');
   const [isTestingAI, setIsTestingAI] = useState<boolean>(false);
   const [aiTestResult, setAiTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  useEffect(() => {
+    setHasSavedAiKey(Boolean(scannerProfile.ai_api_key_configured));
+    setMaskedAiKey(scannerProfile.ai_api_key_masked || '');
+  }, [scannerProfile.ai_api_key_configured, scannerProfile.ai_api_key_masked]);
 
   // Engine auto-installer state (Nmap, Nuclei, OWASP ZAP + JRE)
   const [installingEngine, setInstallingEngine] = useState<'nmap' | 'nuclei' | 'zap' | 'all' | null>(null);
@@ -354,17 +361,42 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
   // Save AI Config & Test
   const handleSaveAIConfig = async () => {
     try {
-      await api.updateScannerProfile({
+      const updated = await api.updateScannerProfile({
         ai_provider: aiProvider as any,
         ai_api_key: aiApiKey,
         ai_model: aiModel,
         ai_base_url: aiBaseUrl,
       });
+      setHasSavedAiKey(Boolean(updated.ai_api_key_configured));
+      setMaskedAiKey(updated.ai_api_key_masked || '');
+      if (aiApiKey.trim()) setAiApiKey('');
       showToast(L('AI engine configuration saved.', 'Configurazione motore AI salvata.'), 'success');
       onRefreshData();
     } catch (err: any) {
       showToast(err.message || L('Error saving AI config.', 'Errore salvataggio AI.'), 'error');
     }
+  };
+
+  const promptClearAiApiKey = () => {
+    setConfirmModal({
+      isOpen: true,
+      title: L('Remove Stored AI API Key', 'Elimina Chiave API AI'),
+      description: L(
+        'Are you sure you want to remove the stored AI API key? UrielScan will revert to the offline engine or local configuration unless a new key is saved.',
+        'Sei sicuro di voler eliminare la chiave API AI salvata? UrielScan userà il motore offline o la configurazione locale finché non verrà salvata una nuova chiave.'
+      ),
+      confirmText: L('Remove Key', 'Elimina Chiave'),
+      isDestructive: true,
+      action: async () => {
+        const updated = await api.clearAiApiKey();
+        setAiApiKey('');
+        setHasSavedAiKey(Boolean(updated.ai_api_key_configured));
+        setMaskedAiKey(updated.ai_api_key_masked || '');
+        setAiTestResult(null);
+        showToast(L('AI API key removed.', 'Chiave API AI eliminata.'), 'info');
+        onRefreshData();
+      },
+    });
   };
 
   const handleTestAI = async () => {
@@ -822,16 +854,40 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-theme-secondary mb-1">
-                API Key
-              </label>
-              <input
-                type="password"
-                value={aiApiKey}
-                onChange={(e) => setAiApiKey(e.target.value)}
-                placeholder="sk-..."
-                className="input-industrial w-full px-2.5 py-1.5 text-xs font-mono"
-              />
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-medium text-theme-secondary">
+                  API Key
+                </label>
+                {hasSavedAiKey && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/30 border border-emerald-600/50 text-emerald-400">
+                    {L('Saved:', 'Salvata:')} {maskedAiKey || '****'}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="password"
+                  value={aiApiKey}
+                  onChange={(e) => setAiApiKey(e.target.value)}
+                  placeholder={
+                    hasSavedAiKey
+                      ? L('Leave blank to keep stored key, or enter a new key', 'Lascia vuoto per mantenere la chiave o inseriscine una nuova')
+                      : 'sk-... / AIza...'
+                  }
+                  className="input-industrial w-full px-2.5 py-1.5 text-xs font-mono"
+                />
+                {hasSavedAiKey && (
+                  <button
+                    type="button"
+                    onClick={promptClearAiApiKey}
+                    className="btn-secondary px-2.5 py-1.5 text-xs text-red-400 hover:text-red-300 hover:border-red-500/60 flex items-center space-x-1 shrink-0"
+                    title={L('Delete saved AI API key', 'Elimina chiave API salvata')}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{L('Remove Key', 'Elimina')}</span>
+                  </button>
+                )}
+              </div>
             </div>
             <div>
               <label className="block text-xs font-medium text-theme-secondary mb-1">

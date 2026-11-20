@@ -129,8 +129,10 @@ export interface ScannerProfile {
   website: string;
   report_footer: string;
   logo_url?: string;
-  ai_provider: 'openai' | 'gemini' | 'anthropic' | 'ollama';
+  ai_provider: 'openai' | 'gemini' | 'anthropic' | 'ollama' | 'offline';
   ai_api_key?: string;
+  ai_api_key_configured?: boolean;
+  ai_api_key_masked?: string;
   ai_model: string;
   ai_base_url?: string;
 }

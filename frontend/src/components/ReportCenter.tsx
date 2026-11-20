@@ -170,7 +170,18 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
   const safeDataImg = (url?: string): string => {
     if (!url) return '';
     const trimmed = url.trim();
-    if (/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,/i.test(trimmed)) {
+    if (/^data:image\/svg\+xml;base64,/i.test(trimmed)) {
+      try {
+        const decoded = atob(trimmed.split('base64,')[1] || '');
+        if (decoded.includes('shieldGrad') || decoded.includes('PURPLE TEAM MSSP')) {
+          return '';
+        }
+      } catch {
+        return '';
+      }
+      return escHtml(trimmed);
+    }
+    if (/^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(trimmed)) {
       return escHtml(trimmed);
     }
     return '';

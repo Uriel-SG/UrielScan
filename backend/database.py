@@ -31,26 +31,7 @@ def _make_svg_base64(svg_str: str) -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
-DEFAULT_MSSP_LOGO = _make_svg_base64("""
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" width="200" height="60">
-  <defs>
-    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#8b5cf6" />
-      <stop offset="100%" stop-color="#3b82f6" />
-    </linearGradient>
-    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#ffffff" />
-      <stop offset="100%" stop-color="#cbd5e1" />
-    </linearGradient>
-  </defs>
-  <g transform="translate(10, 8)">
-    <polygon points="22,2 40,9 40,26 22,42 4,26 4,9" fill="url(#shieldGrad)" stroke="#a855f7" stroke-width="1.5" />
-    <path d="M14,20 L20,26 L30,14" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-  </g>
-  <text x="60" y="32" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="20" fill="url(#textGrad)" letter-spacing="1">URIEL<tspan fill="#a855f7">SCAN</tspan></text>
-  <text x="61" y="46" font-family="system-ui, -apple-system, sans-serif" font-weight="600" font-size="9" fill="#94a3b8" letter-spacing="2">PURPLE TEAM MSSP</text>
-</svg>
-""")
+DEFAULT_MSSP_LOGO = ""
 
 ACME_LOGO = _make_svg_base64("""
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 48" width="160" height="48">
@@ -282,6 +263,20 @@ def init_db() -> None:
             VALUES (?, ?, ?, 'admin', '', 0, '', ?, ?);
         """, ("admin", p_hash, p_salt, must_change, now_iso))
         conn.commit()
+
+    # Clear legacy purple-shield placeholder SVG if still present in scanner_company_logo
+    cursor.execute("SELECT value FROM settings WHERE key = 'scanner_company_logo';")
+    logo_row = cursor.fetchone()
+    if logo_row and isinstance(logo_row["value"], str):
+        val = logo_row["value"].strip()
+        if val.startswith("data:image/svg+xml;base64,"):
+            try:
+                decoded = base64.b64decode(val.split("base64,", 1)[1]).decode("utf-8", errors="ignore")
+                if "shieldGrad" in decoded or "PURPLE TEAM MSSP" in decoded:
+                    cursor.execute("UPDATE settings SET value = '' WHERE key = 'scanner_company_logo';")
+                    conn.commit()
+            except Exception:
+                pass
 
     conn.close()
 

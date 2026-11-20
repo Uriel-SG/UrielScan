@@ -787,6 +787,18 @@ def test_security_audit_regressions():
     assert s["ai_api_key_configured"] is True
     assert s["ai_api_key_masked"] == "sk-s...9999"
 
+    # Explicit removal via DELETE /api/settings/ai-api-key and PUT clear_ai_api_key
+    del_key = client.delete("/api/settings/ai-api-key")
+    assert del_key.status_code == 200
+    assert del_key.json()["ai_api_key_configured"] is False
+    assert client.get("/api/settings").json()["ai_api_key_masked"] == ""
+
+    client.put("/api/settings", json={"ai_api_key": "sk-secret-temp-12345"})
+    assert client.get("/api/settings").json()["ai_api_key_configured"] is True
+    clr = client.put("/api/settings", json={"clear_ai_api_key": True})
+    assert clr.status_code == 200
+    assert clr.json()["ai_api_key_configured"] is False
+
     # H-08 & M-12: CSV formula injection neutralized & DOCX strips control chars
     csv_bytes = export_scan_results_csv(
         [{"id": 1, "org_id": 1, "name": "Test"}],

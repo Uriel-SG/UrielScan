@@ -21,11 +21,19 @@ def _esc(val: Any) -> str:
 
 
 def _safe_img_data_url(url: Any) -> str:
-    """Allows only safe raster/SVG data URIs (or https URLs) properly escaped for img src."""
+    """Allows only safe raster/SVG data URIs (filtering out legacy placeholder SVGs)."""
     if not isinstance(url, str):
         return ""
     s = url.strip()
-    if s.startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/jpg;base64,", "data:image/webp;base64,", "data:image/gif;base64,", "data:image/svg+xml;base64,")):
+    if s.startswith("data:image/svg+xml;base64,"):
+        try:
+            decoded = base64.b64decode(s.split("base64,", 1)[1]).decode("utf-8", errors="ignore")
+            if "shieldGrad" in decoded or "PURPLE TEAM MSSP" in decoded:
+                return ""
+        except Exception:
+            return ""
+        return _esc(s)
+    if s.startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/jpg;base64,", "data:image/webp;base64,", "data:image/gif;base64,")):
         return _esc(s)
     return ""
 

@@ -69,6 +69,8 @@ function normalizeProfile(raw: any): ScannerProfile {
     logo_url: s.logo_url || s.scanner_company_logo || '',
     ai_provider: (s.ai_provider || 'gemini') as ScannerProfile['ai_provider'],
     ai_api_key: s.ai_api_key || '',
+    ai_api_key_configured: Boolean(s.ai_api_key_configured),
+    ai_api_key_masked: s.ai_api_key_masked || '',
     ai_model: s.ai_model || 'gemini-2.5-flash',
     ai_base_url: s.ai_base_url || '',
   };
@@ -448,6 +450,17 @@ export const api = {
     });
     if (!res.ok) {
       throw new Error('Errore nel salvataggio del profilo MSSP');
+    }
+    return normalizeProfile(await res.json());
+  },
+
+  async clearAiApiKey(): Promise<ScannerProfile> {
+    const res = await fetch(`${API_BASE}/settings/ai-api-key`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Errore durante la rimozione della chiave API');
     }
     return normalizeProfile(await res.json());
   },
