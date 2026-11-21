@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Crosshair, 
   Terminal, 
@@ -12,7 +12,9 @@ import {
   Check,
   Loader2,
   Radio,
-  AlertTriangle
+  AlertTriangle,
+  ShieldCheck,
+  RefreshCw,
 } from 'lucide-react';
 import { Organization, NSEScript, Scan, RemoteAgent, NatCheckResult } from '../types';
 import { api } from '../services/api';
@@ -126,12 +128,18 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [scanName, setScanName] = useState<string>(() => L('Purple Assessment - Corporate Perimeter', 'Purple Assessment - Perimetro Aziendale'));
   const [targets, setTargets] = useState<string>(initialOrg?.target_scope || '192.168.1.0/24');
+  const [isManualTargetMode, setIsManualTargetMode] = useState<boolean>(false);
+  const targetInputRef = useRef<HTMLInputElement>(null);
   const [isSavingScope, setIsSavingScope] = useState<boolean>(false);
   const [natCheck, setNatCheck] = useState<NatCheckResult | null>(null);
+  const [routingMode, setRoutingMode] = useState<'direct' | 'tor' | 'custom_proxy'>('direct');
+  const [customProxyUrl, setCustomProxyUrl] = useState<string>('');
+  const [isTestingRouting, setIsTestingRouting] = useState<boolean>(false);
+  const [routingStatus, setRoutingStatus] = useState<{ ok: boolean; ip?: string; is_tor?: boolean; message?: string } | null>(null);
 
   useEffect(() => {
     const trimmed = targets.trim();
-    if (!trimmed || trimmed.length < 3 || selectedAgentId) {
+    if (!trimmed || trimmed.length < 3 || selectedAgentId || routingMode !== 'direct') {
       setNatCheck(null);
       return;
     }
@@ -147,7 +155,53 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       active = false;
       clearTimeout(timer);
     };
-  }, [targets, selectedAgentId]);
+  }, [targets, selectedAgentId, routingMode]);
+
+  const handleVerifyRouting = async (rotate = false) => {
+    setIsTestingRouting(true);
+    setRoutingStatus(null);
+    try {
+      if (routingMode === 'tor') {
+        const res = rotate ? await api.newTorIdentity() : await api.startTor();
+        setRoutingStatus({
+          ok: Boolean(res.ok),
+          ip: res.ip,
+          is_tor: res.is_tor,
+          message: res.ip
+            ? `${L('Visible Exit IP', 'Exit IP visibile')}: ${res.ip}${res.is_tor ? ' (Tor Exit Verified)' : ''}`
+            : L('Tor daemon started.', 'Demone Tor avviato.'),
+        });
+        showToast(
+          res.ip ? `Tor Exit IP: ${res.ip}` : L('Tor circuit active.', 'Circuito Tor attivo.'),
+          'success'
+        );
+      } else if (routingMode === 'custom_proxy') {
+        if (!customProxyUrl.trim()) {
+          showToast(L('Enter a SOCKS5 or HTTP proxy URL first.', 'Inserisci prima un URL proxy SOCKS5 o HTTP.'), 'warning');
+          return;
+        }
+        const res = await api.testProxy(customProxyUrl.trim());
+        setRoutingStatus({
+          ok: Boolean(res.ok),
+          ip: res.ip,
+          is_tor: res.is_tor,
+          message: res.ok
+            ? `${L('Visible Exit IP', 'Exit IP visibile')}: ${res.ip || 'OK'}`
+            : (res.error || L('Proxy test failed', 'Test proxy fallito')),
+        });
+        showToast(
+          res.ok ? `${L('Proxy connected — Exit IP', 'Proxy connesso — Exit IP')}: ${res.ip}` : (res.error || L('Proxy failed', 'Proxy non raggiungibile')),
+          res.ok ? 'success' : 'error'
+        );
+      }
+    } catch (err: any) {
+      const msg = err?.message || L('Routing check failed.', 'Verifica instradamento fallita.');
+      setRoutingStatus({ ok: false, message: msg });
+      showToast(msg, 'error');
+    } finally {
+      setIsTestingRouting(false);
+    }
+  };
 
   useEffect(() => {
     api.getAgents().then((data) => {
@@ -231,11 +285,17 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const handleOrgChange = (newOrgId: string) => {
     setOrgId(newOrgId);
     setSelectedAgentId('');
+    setIsManualTargetMode(false);
     const nextOrg = organizations.find((o) => o.id === newOrgId);
     if (nextOrg?.target_scope) {
       setTargets(nextOrg.target_scope);
     }
   };
+
+  const selectedNetworkValue = useMemo(() => {
+    if (isManualTargetMode) return '__custom__';
+    return orgNetworkOptions.some((o) => o.value === targets.trim()) ? targets.trim() : '__custom__';
+  }, [isManualTargetMode, orgNetworkOptions, targets]);
 
   const isTargetAlreadyRegistered = useMemo(() => {
     const trimmed = targets.trim();
@@ -424,8 +484,19 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       return;
     }
 
+    if (!selectedAgentId && routingMode === 'custom_proxy' && !customProxyUrl.trim()) {
+      showToast(
+        L('Please enter a valid SOCKS5 or HTTP proxy URL, or switch routing back to Direct.', 'Inserisci un URL proxy SOCKS5 o HTTP valido, oppure imposta l\'instradamento su Diretto.'),
+        'warning',
+        L('Missing Proxy URL', 'URL Proxy Mancante')
+      );
+      return;
+    }
+
     setIsSubmitting(true);
     const activeProfileObj = profiles.find((p) => p.id === activeProfile);
+    const effectiveOnion = !selectedAgentId && routingMode === 'tor';
+    const effectiveProxy = !selectedAgentId && routingMode === 'custom_proxy' ? customProxyUrl.trim() : undefined;
 
     const scanPayload = {
       org_id: orgId || (organizations[0]?.id || '1'),
@@ -434,6 +505,8 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       targets: targets.trim(),
       scan_type: activeProfileObj?.name || 'Purple Assessment',
       engines: activeEnginesList,
+      onion_mode: effectiveOnion,
+      proxy_url: effectiveProxy,
       config: {
         ports: portSelection === 'custom' ? customPorts : portSelection,
         nmap_flags: activeFlagsString,
@@ -442,6 +515,8 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
         nuclei_severities: nucleiSeverity,
         web_checks: webChecks,
         zap_mode: zapMode,
+        onion_mode: effectiveOnion,
+        ...(effectiveProxy ? { proxy_url: effectiveProxy } : {}),
       },
       nmap_args: liveNmapCommand,
       nse_scripts: selectedNseScripts,
@@ -584,13 +659,20 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
               {L('Registered Internal Networks', 'Reti Interne Registrate')} ({selectedOrg?.name || L('Company', 'Azienda')})
             </label>
             <select
-              value={orgNetworkOptions.some((o) => o.value === targets.trim()) ? targets.trim() : '__custom__'}
+              value={selectedNetworkValue}
               onChange={(e) => {
-                if (e.target.value !== '__custom__') {
+                if (e.target.value === '__custom__') {
+                  setIsManualTargetMode(true);
+                  setTargets('');
+                  setTimeout(() => targetInputRef.current?.focus(), 0);
+                } else {
+                  setIsManualTargetMode(false);
                   setTargets(e.target.value);
                 }
               }}
-              className="input-industrial w-full px-2.5 py-2 text-xs font-mono"
+              className={`input-industrial w-full px-2.5 py-2 text-xs font-mono ${
+                selectedNetworkValue === '__custom__' ? 'text-theme-accent font-semibold' : ''
+              }`}
             >
               {orgNetworkOptions.map((opt) => (
                 <option key={opt.value} value={opt.value} className="bg-panel text-theme-primary">
@@ -621,9 +703,16 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
               )}
             </div>
             <input
+              ref={targetInputRef}
               type="text"
               value={targets}
-              onChange={(e) => setTargets(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setTargets(val);
+                if (isManualTargetMode && !val.trim()) {
+                  setIsManualTargetMode(true);
+                }
+              }}
               placeholder={L('e.g. 192.168.1.0/24, 10.10.10.0/24, https://portal.local', 'es. 192.168.1.0/24, 10.10.10.0/24, https://portale.local')}
               className="input-industrial w-full px-3 py-2 text-xs font-mono tabular-nums"
             />
@@ -649,6 +738,154 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
             </div>
           </div>
         )}
+
+        {/* Outbound Network Routing (Tor Onion / SOCKS5 Proxy) */}
+        <div className="pt-2 border-t border-theme-subtle space-y-2.5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center space-x-2">
+              <ShieldCheck className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-theme-secondary">
+                {L('Outbound Network Routing', 'Instradamento Rete in Uscita')}
+              </span>
+            </div>
+            {selectedAgentId && (
+              <span className="text-[11px] font-mono text-theme-muted">
+                {L('Disabled when delegating to a Remote Probe', 'Disabilitato quando si delega a una Sonda Remota')}
+              </span>
+            )}
+          </div>
+
+          <div className={`grid grid-cols-1 sm:grid-cols-3 gap-2 ${selectedAgentId ? 'opacity-50 pointer-events-none' : ''}`}>
+            <button
+              type="button"
+              onClick={() => {
+                setRoutingMode('direct');
+                setRoutingStatus(null);
+              }}
+              className={`px-3 py-2 rounded border text-left transition ${
+                routingMode === 'direct'
+                  ? 'border-theme-accent bg-subtle text-theme-primary'
+                  : 'border-theme bg-panel text-theme-secondary hover:bg-subtle'
+              }`}
+            >
+              <div className="text-xs font-bold flex items-center justify-between">
+                <span>{L('Direct (Local IP)', 'Diretto (IP Locale)')}</span>
+                {routingMode === 'direct' && <Check className="w-3.5 h-3.5 text-theme-accent" />}
+              </div>
+              <div className="text-[10px] text-theme-muted mt-0.5">
+                {L('Standard server egress & LAN subnet scanning', 'Uscita diretta server e scansioni subnet LAN')}
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setRoutingMode('tor');
+                setRoutingStatus(null);
+              }}
+              className={`px-3 py-2 rounded border text-left transition ${
+                routingMode === 'tor'
+                  ? 'border-purple-500 bg-purple-950/30 text-purple-100'
+                  : 'border-theme bg-panel text-theme-secondary hover:bg-subtle'
+              }`}
+            >
+              <div className="text-xs font-bold flex items-center justify-between">
+                <span>Onion Routing (Tor)</span>
+                {routingMode === 'tor' && <Check className="w-3.5 h-3.5 text-purple-400" />}
+              </div>
+              <div className="text-[10px] text-theme-muted mt-0.5">
+                {L('Anonymous Tor SOCKS5h circuit + .onion support', 'Circuito Tor SOCKS5h anonimo + supporto .onion')}
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setRoutingMode('custom_proxy');
+                setRoutingStatus(null);
+              }}
+              className={`px-3 py-2 rounded border text-left transition ${
+                routingMode === 'custom_proxy'
+                  ? 'border-sky-500 bg-sky-950/30 text-sky-100'
+                  : 'border-theme bg-panel text-theme-secondary hover:bg-subtle'
+              }`}
+            >
+              <div className="text-xs font-bold flex items-center justify-between">
+                <span>{L('Custom SOCKS5 / HTTP Proxy', 'Proxy SOCKS5 / HTTP Custom')}</span>
+                {routingMode === 'custom_proxy' && <Check className="w-3.5 h-3.5 text-sky-400" />}
+              </div>
+              <div className="text-[10px] text-theme-muted mt-0.5">
+                {L('Dedicated VPS tunnel, VPN gateway or HTTP proxy', 'Tunnel VPS dedicato, VPN gateway o proxy HTTP')}
+              </div>
+            </button>
+          </div>
+
+          {!selectedAgentId && routingMode === 'tor' && (
+            <div className="p-2.5 rounded border border-purple-500/40 bg-purple-950/20 space-y-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] text-purple-200/90 leading-snug">
+                  {L(
+                    'All Native TCP/SSL/Web, Nuclei and OWASP ZAP probes will tunnel through embedded Tor SOCKS5h. Direct Nmap raw SYN/UDP is skipped to avoid IP/DNS leaks. Note: public Tor Exit Nodes may trigger Cloudflare/WAF challenges.',
+                    'Tutte le sonde Native TCP/SSL/Web, Nuclei e OWASP ZAP passeranno dal tunnel Tor SOCKS5h integrato. Nmap raw viene sostituito da Native Net via SOCKS5 per impedire IP/DNS leak. Nota: gli Exit Node Tor pubblici possono attivare blocchi Cloudflare/WAF.'
+                  )}
+                </p>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isTestingRouting}
+                    onClick={() => handleVerifyRouting(false)}
+                    className="px-2.5 py-1 rounded border border-purple-500/60 bg-purple-900/40 hover:bg-purple-800/50 text-[11px] font-semibold text-purple-100 flex items-center space-x-1 disabled:opacity-50"
+                  >
+                    {isTestingRouting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Globe className="w-3 h-3" />}
+                    <span>{L('Check Tor IP', 'Verifica IP Tor')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isTestingRouting}
+                    onClick={() => handleVerifyRouting(true)}
+                    className="px-2.5 py-1 rounded border border-theme bg-panel hover:bg-subtle text-[11px] font-semibold text-theme-primary flex items-center space-x-1 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isTestingRouting ? 'animate-spin' : ''}`} />
+                    <span>{L('New Circuit', 'Nuovo Circuito')}</span>
+                  </button>
+                </div>
+              </div>
+              {routingStatus && (
+                <div className={`text-[11px] font-mono ${routingStatus.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {routingStatus.message}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!selectedAgentId && routingMode === 'custom_proxy' && (
+            <div className="p-2.5 rounded border border-sky-500/40 bg-sky-950/20 space-y-2 text-xs">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  value={customProxyUrl}
+                  onChange={(e) => setCustomProxyUrl(e.target.value)}
+                  placeholder="socks5h://127.0.0.1:1080 or http://user:pass@proxy.host:8080"
+                  className="input-industrial flex-1 px-3 py-1.5 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  disabled={isTestingRouting || !customProxyUrl.trim()}
+                  onClick={() => handleVerifyRouting(false)}
+                  className="px-3 py-1.5 rounded border border-sky-500/60 bg-sky-900/40 hover:bg-sky-800/50 text-xs font-semibold text-sky-100 flex items-center justify-center space-x-1.5 shrink-0 disabled:opacity-50"
+                >
+                  {isTestingRouting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Globe className="w-3.5 h-3.5" />}
+                  <span>{L('Verify Exit IP', 'Verifica IP Proxy')}</span>
+                </button>
+              </div>
+              {routingStatus && (
+                <div className={`text-[11px] font-mono ${routingStatus.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {routingStatus.message}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Profiles */}

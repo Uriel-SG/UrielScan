@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional, Callable
 import httpx
 
 from backend.scanners.archive_utils import safe_extract_zip, stream_download
+from backend.scanners.tor_engine import validate_proxy_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BIN_DIR = BASE_DIR / "bin"
@@ -172,7 +173,8 @@ async def run_nuclei_scan(
     targets: str,
     severities: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
-    log_callback: Optional[Callable[[str, str], Any]] = None
+    log_callback: Optional[Callable[[str, str], Any]] = None,
+    proxy_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     det = detect_nuclei()
 
@@ -217,9 +219,21 @@ async def run_nuclei_scan(
         "-jsonl",
         "-silent",
         "-nc",
-        "-timeout", "5",
-        "-retries", "1"
+        "-timeout", "15" if proxy_url else "5",
+        "-retries", "2" if proxy_url else "1"
     ]
+
+    if proxy_url:
+        validated_proxy = validate_proxy_url(proxy_url)
+        if validated_proxy:
+            # Go/Nuclei fastdialer expects socks5:// rather than socks5h:// and resolves remotely via proxy
+            nuclei_proxy = (
+                "socks5://" + validated_proxy[len("socks5h://"):]
+                if validated_proxy.lower().startswith("socks5h://")
+                else validated_proxy
+            )
+            args.extend(["-proxy", nuclei_proxy])
+            log("INFO", f"[Nuclei] Routing tramite proxy attivo ({nuclei_proxy.split('@')[-1]})")
 
     if severities and len(severities) > 0:
         args.extend(["-severity", ",".join(severities)])
@@ -232,6 +246,7 @@ async def run_nuclei_scan(
     log("INFO", f"Avvio scansione Nuclei su {len(formatted_targets)} URL target...")
 
     findings = []
+    scan_timeout = 480.0 if proxy_url else 300.0
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -239,11 +254,11 @@ async def run_nuclei_scan(
             stderr=asyncio.subprocess.PIPE
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=scan_timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            log("ERROR", "Timeout globale Nuclei raggiunto (300s): processo terminato.")
+            log("ERROR", f"Timeout globale Nuclei raggiunto ({int(scan_timeout)}s): processo terminato.")
             return []
     except Exception as e:
         log("ERROR", f"Errore durante l'esecuzione di Nuclei: {str(e)}")

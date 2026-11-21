@@ -102,8 +102,10 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
     setMaskedAiKey(scannerProfile.ai_api_key_masked || '');
   }, [scannerProfile.ai_api_key_configured, scannerProfile.ai_api_key_masked]);
 
-  // Engine auto-installer state (Nmap, Nuclei, OWASP ZAP + JRE)
-  const [installingEngine, setInstallingEngine] = useState<'nmap' | 'nuclei' | 'zap' | 'all' | null>(null);
+  // Engine auto-installer state (Nmap, Nuclei, OWASP ZAP + JRE, Tor Onion)
+  const [installingEngine, setInstallingEngine] = useState<'nmap' | 'nuclei' | 'zap' | 'tor' | 'all' | null>(null);
+  const [torBusyAction, setTorBusyAction] = useState<'start' | 'stop' | 'rotate' | null>(null);
+  const [torExitInfo, setTorExitInfo] = useState<{ ip?: string; is_tor?: boolean } | null>(null);
   const [engineInstallResult, setEngineInstallResult] = useState<string | null>(null);
 
   // Security & 2FA State
@@ -424,16 +426,16 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
     }
   };
 
-  // Auto-install individual or all missing engines (Nmap, Nuclei, OWASP ZAP)
-  const handleInstallEngine = async (engine: 'nmap' | 'nuclei' | 'zap' | 'all') => {
+  // Auto-install individual or all missing engines (Nmap, Nuclei, OWASP ZAP + JRE, Tor Onion)
+  const handleInstallEngine = async (engine: 'nmap' | 'nuclei' | 'zap' | 'tor' | 'all') => {
     setInstallingEngine(engine);
     setEngineInstallResult(null);
     try {
       if (engine === 'all') {
         await api.installAllEngines();
         const msg = L(
-          'Background installation started for all missing engines (Nmap, Nuclei, OWASP ZAP + JRE). Status updates automatically.',
-          'Installazione in background avviata per tutti i motori mancanti (Nmap, Nuclei, OWASP ZAP + JRE). Lo stato si aggiorna automaticamente.'
+          'Background installation started for all missing engines (Nmap, Nuclei, OWASP ZAP + JRE, Tor Onion Engine). Status updates automatically.',
+          'Installazione in background avviata per tutti i motori mancanti (Nmap, Nuclei, OWASP ZAP + JRE, Tor Onion Engine). Lo stato si aggiorna automaticamente.'
         );
         setEngineInstallResult(msg);
         showToast(msg, 'info');
@@ -445,6 +447,8 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
           ? await api.installNmap()
           : engine === 'zap'
           ? await api.installZap()
+          : engine === 'tor'
+          ? await api.installTor()
           : await api.installNuclei();
       setEngineInstallResult(res.message);
       showToast(res.message, res.success ? 'success' : 'warning');
@@ -455,6 +459,35 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
       showToast(msg, 'error');
     } finally {
       setInstallingEngine(null);
+    }
+  };
+
+  const handleTorAction = async (action: 'start' | 'stop' | 'rotate') => {
+    setTorBusyAction(action);
+    setEngineInstallResult(null);
+    try {
+      if (action === 'stop') {
+        const res = await api.stopTor();
+        setTorExitInfo(null);
+        const msg = res.message || L('Tor daemon stopped.', 'Demone Tor arrestato.');
+        setEngineInstallResult(msg);
+        showToast(msg, 'info');
+      } else {
+        const res = action === 'rotate' ? await api.newTorIdentity() : await api.startTor();
+        if (res.ip) setTorExitInfo({ ip: res.ip, is_tor: res.is_tor });
+        const msg = res.ip
+          ? `${L('Tor daemon active — Exit IP', 'Demone Tor attivo — Exit IP')}: ${res.ip}`
+          : L('Tor daemon active.', 'Demone Tor attivo.');
+        setEngineInstallResult(msg);
+        showToast(msg, 'success');
+      }
+      onRefreshData();
+    } catch (err: any) {
+      const msg = err?.message || L('Tor operation failed.', 'Operazione Tor fallita.');
+      setEngineInstallResult(msg);
+      showToast(msg, 'error');
+    } finally {
+      setTorBusyAction(null);
     }
   };
 
@@ -953,7 +986,7 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
               <h2 className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
                 {L('Scanning Engines Status', 'Stato Motori di Scansione')}
               </h2>
-              {(!engineStatus.nmap.available || !engineStatus.nuclei.available || !engineStatus.zap?.available) && (
+              {(!engineStatus.nmap.available || !engineStatus.nuclei.available || !engineStatus.zap?.available || !engineStatus.tor?.installed) && (
                 <button
                   type="button"
                   onClick={() => handleInstallEngine('all')}
@@ -977,8 +1010,8 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                 <Loader2 className="w-4 h-4 animate-spin text-theme-accent shrink-0" />
                 <span>
                   {L(
-                    'First-launch auto-setup is downloading and configuring missing engines in the background (Nmap / Nuclei / OWASP ZAP + Java 17 JRE)...',
-                    'Configurazione automatica iniziale in corso in background per i motori mancanti (Nmap / Nuclei / OWASP ZAP + Java 17 JRE)...'
+                    'First-launch auto-setup is downloading and configuring missing engines in the background (Nmap / Nuclei / OWASP ZAP + Java 17 JRE / Tor Onion Engine)...',
+                    'Configurazione automatica iniziale in corso in background per i motori mancanti (Nmap / Nuclei / OWASP ZAP + Java 17 JRE / Tor Onion Engine)...'
                   )}
                 </span>
               </div>
@@ -1092,6 +1125,89 @@ export const SettingsAndOrgs: React.FC<SettingsAndOrgsProps> = ({
                       {installingEngine === 'zap' && <Loader2 className="w-3 h-3 animate-spin" />}
                       <span>{installingEngine === 'zap' ? L('Installing...', 'Installazione...') : L('Install OWASP ZAP', 'Installa OWASP ZAP')}</span>
                     </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-3 rounded border border-theme bg-subtle flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-theme-primary flex items-center space-x-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Tor Onion Routing Engine (SOCKS5h)</span>
+                  </div>
+                  <div className="text-[11px] text-theme-secondary">
+                    {engineStatus.tor?.installed
+                      ? `${L('Version:', 'Versione:')} ${engineStatus.tor.version || 'Tor Expert Bundle'} • ${engineStatus.tor.running ? `Running (${engineStatus.tor.proxy_url})` : L('Ready on demand (127.0.0.1:19050)', 'Pronto su richiesta (127.0.0.1:19050)')}`
+                      : (engineStatus.bootstrap?.engines?.tor?.message || L('Embedded Tor Expert Bundle — auto-installs in bin/tor/ for Onion Routing & .onion scanning', 'Tor Expert Bundle integrato — scaricato automaticamente in bin/tor/ per Onion Routing e .onion'))}
+                    {torExitInfo?.ip && (
+                      <span className="ml-2 font-mono text-emerald-400">
+                        • Exit IP: {torExitInfo.ip} {torExitInfo.is_tor ? '(Tor Verified)' : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center space-x-2 shrink-0 flex-wrap gap-y-1">
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                    engineStatus.tor?.running
+                      ? 'bg-purple-950/40 border-purple-500 text-purple-300'
+                      : engineStatus.tor?.installed
+                      ? 'bg-emerald-950/30 border-emerald-600 text-emerald-400'
+                      : engineStatus.bootstrap?.engines?.tor?.status === 'installing'
+                      ? 'bg-sky-950/30 border-sky-600 text-sky-400'
+                      : 'bg-subtle border-theme text-theme-muted'
+                  }`}>
+                    {engineStatus.tor?.running
+                      ? L('CIRCUIT ACTIVE', 'CIRCUITO ATTIVO')
+                      : engineStatus.tor?.installed
+                      ? L('INSTALLED', 'INSTALLATO')
+                      : engineStatus.bootstrap?.engines?.tor?.status === 'installing'
+                      ? L('INSTALLING...', 'INSTALLAZIONE...')
+                      : L('NOT INSTALLED', 'NON INSTALLATO')}
+                  </span>
+                  {!engineStatus.tor?.installed ? (
+                    <button
+                      type="button"
+                      onClick={() => handleInstallEngine('tor')}
+                      disabled={installingEngine !== null}
+                      className="btn-primary px-2.5 py-1 text-xs flex items-center space-x-1 disabled:opacity-50"
+                    >
+                      {installingEngine === 'tor' && <Loader2 className="w-3 h-3 animate-spin" />}
+                      <span>{installingEngine === 'tor' ? L('Installing...', 'Installazione...') : L('Install Tor', 'Installa Tor')}</span>
+                    </button>
+                  ) : (
+                    <>
+                      {!engineStatus.tor?.running ? (
+                        <button
+                          type="button"
+                          onClick={() => handleTorAction('start')}
+                          disabled={torBusyAction !== null}
+                          className="btn-primary px-2.5 py-1 text-xs flex items-center space-x-1 disabled:opacity-50"
+                        >
+                          {torBusyAction === 'start' && <Loader2 className="w-3 h-3 animate-spin" />}
+                          <span>{L('Start & Verify', 'Avvia e Verifica')}</span>
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleTorAction('rotate')}
+                            disabled={torBusyAction !== null}
+                            className="px-2.5 py-1 text-xs rounded border border-purple-500/60 bg-purple-950/30 text-purple-200 hover:bg-purple-900/40 flex items-center space-x-1 disabled:opacity-50"
+                          >
+                            {torBusyAction === 'rotate' ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                            <span>{L('New Circuit', 'Nuovo Circuito')}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleTorAction('stop')}
+                            disabled={torBusyAction !== null}
+                            className="px-2.5 py-1 text-xs rounded border border-theme bg-panel text-theme-secondary hover:text-theme-primary disabled:opacity-50"
+                          >
+                            {torBusyAction === 'stop' ? L('Stopping...', 'Arresto...') : L('Stop', 'Ferma')}
+                          </button>
+                        </>
+                      )}
+                    </>
                   )}
                 </div>
               </div>

@@ -11,6 +11,7 @@ venv/
 data/*.db*
 data/*.sqlite*
 data/.session_secret
+data/tor_data/
 reports/*.html
 reports/*.pdf
 reports/*.docx

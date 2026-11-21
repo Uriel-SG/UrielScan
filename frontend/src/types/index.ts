@@ -88,6 +88,15 @@ export interface Scan {
   nuclei_severity?: string[];
   web_checks?: string[];
   zap_mode?: 'baseline' | 'full';
+  onion_mode?: boolean;
+  proxy_url?: string;
+  routing?: {
+    mode?: string;
+    onion_mode?: boolean;
+    proxy_url?: string;
+    exit_ip?: string;
+    is_tor?: boolean;
+  };
   status: ScanStatus;
   progress: number;
   started_at: string;
@@ -151,6 +160,15 @@ export interface EngineStatus {
     available: boolean;
     version?: string;
     mode?: string;
+  };
+  tor?: {
+    available: boolean;
+    installed: boolean;
+    version?: string;
+    running?: boolean;
+    socks_port?: number;
+    control_port?: number;
+    proxy_url?: string;
   };
   native: {
     available: boolean;

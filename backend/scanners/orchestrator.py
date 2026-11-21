@@ -14,6 +14,12 @@ from backend.scanners.nat_guard import (
     query_external_wan_internetdb,
     filter_loopback_artifacts,
 )
+from backend.scanners.tor_engine import (
+    ensure_tor_running,
+    rotate_tor_circuit,
+    get_proxy_exit_ip,
+    validate_proxy_url,
+)
 from backend.ai_engine import analyze_findings
 
 STOP_FLAGS: Dict[int, bool] = {}
@@ -102,9 +108,70 @@ async def run_scan_pipeline(scan_id: int) -> None:
     nat_status: Dict[str, Any] = {"has_nat_loopback": False, "details": []}
     wan_info: Dict[str, Any] = {"ok": False, "ports": []}
 
+    onion_mode = bool(config.get("onion_mode"))
+    raw_proxy_url = config.get("proxy_url")
+    active_proxy_url: Optional[str] = None
+    routing_meta: Dict[str, Any] = {
+        "mode": "direct",
+        "onion_mode": onion_mode,
+        "exit_ip": "",
+        "is_tor": False,
+    }
+
     try:
+        if onion_mode:
+            update_progress(8, "Avvio circuito Tor (Onion Routing)...")
+            append_log("INFO", "[Onion Routing] Inizializzazione demone Tor e negoziazione circuito anonimo...")
+            tor_res = await ensure_tor_running(timeout=90.0, log_callback=append_log)
+            if not tor_res.get("ok"):
+                raise RuntimeError(
+                    f"Modalità Onion attivata ma Tor non è disponibile: {tor_res.get('error', 'avvio fallito')}. Scansione bloccata per prevenire IP leak."
+                )
+            active_proxy_url = tor_res["proxy_url"]
+            await rotate_tor_circuit(int(tor_res.get("control_port", 19051)))
+            exit_info = await get_proxy_exit_ip(active_proxy_url, timeout=20.0)
+            routing_meta = {
+                "mode": "tor",
+                "onion_mode": True,
+                "proxy_url": active_proxy_url,
+                "exit_ip": exit_info.get("ip", ""),
+                "is_tor": bool(exit_info.get("is_tor", False)),
+            }
+            if exit_info.get("ok"):
+                append_log(
+                    "INFO",
+                    f"[Onion Routing] Circuito Tor operativo — Exit IP visibile: {exit_info.get('ip')} (Tor Exit Node={exit_info.get('is_tor')})",
+                )
+            else:
+                append_log(
+                    "WARN",
+                    f"[Onion Routing] Tunnel SOCKS5 Tor attivo ({active_proxy_url}), verifica exit IP non riuscita: {exit_info.get('error', '')}",
+                )
+        elif raw_proxy_url:
+            active_proxy_url = validate_proxy_url(str(raw_proxy_url))
+            if active_proxy_url:
+                update_progress(8, "Verifica connettività proxy SOCKS5/HTTP...")
+                exit_info = await get_proxy_exit_ip(active_proxy_url, timeout=15.0)
+                sanitized_proxy = active_proxy_url.split("@")[-1]
+                routing_meta = {
+                    "mode": "custom_proxy",
+                    "onion_mode": False,
+                    "proxy_url": sanitized_proxy,
+                    "exit_ip": exit_info.get("ip", ""),
+                    "is_tor": bool(exit_info.get("is_tor", False)),
+                }
+                if exit_info.get("ok"):
+                    append_log(
+                        "INFO",
+                        f"[Proxy Routing] Instradamento tramite {sanitized_proxy} — Exit IP: {exit_info.get('ip')}",
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Proxy configurato non raggiungibile ({sanitized_proxy}): {exit_info.get('error', 'errore connessione')}. Scansione bloccata per prevenire IP leak."
+                    )
+
         targets_list = [t.strip() for t in (targets.split(",") if isinstance(targets, str) else targets) if t.strip()]
-        if targets_list:
+        if targets_list and not active_proxy_url:
             try:
                 nat_status = await asyncio.to_thread(check_targets_nat_loopback, targets_list)
                 if nat_status.get("has_nat_loopback") and nat_status.get("egress_public_ip"):
@@ -116,6 +183,8 @@ async def run_scan_pipeline(scan_id: int) -> None:
                     wan_info = await asyncio.to_thread(query_external_wan_internetdb, egress_ip)
             except Exception as nat_exc:
                 append_log("WARN", f"NAT Guard pre-check non riuscito: {nat_exc}")
+        elif active_proxy_url:
+            append_log("INFO", "NAT Loopback Guard disabilitato in modalità Onion/Proxy (traffico instradato verso nodo di uscita esterno).")
         if STOP_FLAGS.get(scan_id, False):
             return
 
@@ -150,7 +219,9 @@ async def run_scan_pipeline(scan_id: int) -> None:
                         ports=ports_cfg,
                         nmap_flags=nmap_flags_cfg,
                         nse_scripts=custom_nse,
-                        log_callback=append_log
+                        log_callback=append_log,
+                        onion_mode=onion_mode,
+                        proxy_url=active_proxy_url,
                     )
 
                     for nh in nmap_res["hosts"]:
@@ -158,7 +229,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
                         all_hosts[ip] = nh
 
                     all_findings.extend(nmap_res["findings"])
-                    nmap_ran_successfully = len(nmap_res["hosts"]) > 0
+                    nmap_ran_successfully = (len(nmap_res["hosts"]) > 0) and not nmap_res.get("skipped_for_proxy", False)
                 except Exception as ne:
                     append_log("ERROR", f"Errore durante l'esecuzione di Nmap: {str(ne)}")
             else:
@@ -170,7 +241,12 @@ async def run_scan_pipeline(scan_id: int) -> None:
         # -------------------------------------------------------------
         # 2. Native Network & Port Scan (Banner Grabbing & Fallback)
         # -------------------------------------------------------------
-        if "native" in engines or "native_net" in engines:
+        should_run_native_net = (
+            "native" in engines
+            or "native_net" in engines
+            or (bool(active_proxy_url) and "nmap" in engines and not nmap_ran_successfully)
+        )
+        if should_run_native_net:
             # If Nmap already discovered a multi-host subnet (> 3 hosts), inspect hosts with open ports;
             # if Nmap returned 0 open ports across all live hosts (e.g. timeout/filtering), fall back to scanning all live hosts!
             if nmap_ran_successfully and len(all_hosts) > 3:
@@ -192,7 +268,8 @@ async def run_scan_pipeline(scan_id: int) -> None:
                 net_hosts, net_findings = await run_native_net_scan(
                     targets=native_target_str,
                     ports=custom_ports,
-                    log_callback=append_log
+                    log_callback=append_log,
+                    proxy_url=active_proxy_url,
                 )
                 for h in net_hosts:
                     ip = h["ip"]
@@ -236,7 +313,11 @@ async def run_scan_pipeline(scan_id: int) -> None:
                 web_targets_str = ""
             if web_targets_str:
                 update_progress(58, "Audit Crittografia SSL/TLS in corso...")
-                ssl_findings = await run_native_ssl_scan(targets=web_targets_str, log_callback=append_log)
+                ssl_findings = await run_native_ssl_scan(
+                    targets=web_targets_str,
+                    log_callback=append_log,
+                    proxy_url=active_proxy_url,
+                )
                 all_findings.extend(ssl_findings)
 
                 update_progress(68, "Audit Applicativo Web OWASP in corso...")
@@ -244,7 +325,8 @@ async def run_scan_pipeline(scan_id: int) -> None:
                 web_findings = await run_native_web_scan(
                     targets=web_targets_str,
                     discovered_hosts=web_hosts_objs,
-                    log_callback=append_log
+                    log_callback=append_log,
+                    proxy_url=active_proxy_url,
                 )
                 all_findings.extend(web_findings)
 
@@ -283,7 +365,8 @@ async def run_scan_pipeline(scan_id: int) -> None:
                         targets=web_scan_targets_str,
                         tags=config.get("nuclei_tags"),
                         severities=config.get("nuclei_severities"),
-                        log_callback=append_log
+                        log_callback=append_log,
+                        proxy_url=active_proxy_url,
                     )
                     all_findings.extend(nuclei_findings)
                 else:
@@ -305,6 +388,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
                         targets=web_scan_targets_str,
                         zap_mode=zap_mode,
                         log_callback=append_log,
+                        proxy_url=active_proxy_url,
                     )
                     all_findings.extend(zap_findings)
                 else:
@@ -349,7 +433,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
 
         hosts_list = list(all_hosts.values())
         nat_stats: Dict[str, Any] = {}
-        if nat_status.get("has_nat_loopback") and nat_status.get("egress_public_ip"):
+        if not active_proxy_url and nat_status.get("has_nat_loopback") and nat_status.get("egress_public_ip"):
             hosts_list, unique_findings, nat_stats = filter_loopback_artifacts(
                 nat_status.get("details", []),
                 hosts_list,
@@ -393,6 +477,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
             "engines_used": engines,
             "nat_loopback_detected": bool(nat_stats),
             "nat_guard": nat_stats,
+            "routing": routing_meta,
         }
 
         with conn:

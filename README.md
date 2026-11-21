@@ -6,18 +6,21 @@
 
 ## Quick Start (Windows & Linux)
 
-- **Windows**:
+### 1. First-Time Setup (Python `.venv` + All Engines: Nmap, Nuclei, OWASP ZAP + JRE 17, Tor)
+- **Windows** (double-click or terminal):
   ```powershell
-  .\start.bat
-  # or directly:
-  python run.py
+  .\install.bat
+  # or via PowerShell:
+  powershell -ExecutionPolicy Bypass -File .\install.ps1
   ```
 - **Linux / macOS**:
   ```bash
-  chmod +x start.sh && ./start.sh
-  # or directly:
-  python3 run.py
+  chmod +x install.sh && ./install.sh
   ```
+
+### 2. Launch Application
+- **Windows**: `start.bat` (or `.venv\Scripts\python.exe run.py`)
+- **Linux / macOS**: `./start.sh` (or `.venv/bin/python run.py`)
 
 Once started, the UrielScan dashboard is available in your browser at **`http://localhost:8000`** (OpenAPI documentation is available at `http://localhost:8000/docs`).
 
@@ -39,6 +42,9 @@ To scan internal client networks without opening inbound firewall ports or encou
   - [`backend/main.py`](backend/main.py): FastAPI server + SPA mount + REST API (including Auth, 2FA TOTP, and Remote Agent endpoints).
   - [`backend/scanners/nmap_engine.py`](backend/scanners/nmap_engine.py): Native Nmap integration + system `.nse` script indexing + ZenMap++ scan profiles.
   - [`backend/scanners/nuclei_engine.py`](backend/scanners/nuclei_engine.py): Nuclei integration with cross-platform auto-downloader from official GitHub Releases.
+  - [`backend/scanners/zap_engine.py`](backend/scanners/zap_engine.py): OWASP ZAP integration (Daemon API / CLI + portable Temurin JRE 17 auto-provisioning) with cross-engine deduplication.
+  - [`backend/scanners/tor_engine.py`](backend/scanners/tor_engine.py): Managed Tor Expert Bundle lifecycle, SOCKS5h/HTTP CONNECT tunneling, exit IP verification, and circuit rotation.
+  - [`backend/scanners/engine_bootstrap.py`](backend/scanners/engine_bootstrap.py): Unified auto-provisioning engine for Nmap, Nuclei, OWASP ZAP, and Tor (`bin/`).
   - [`backend/scanners/native_engine.py`](backend/scanners/native_engine.py): Asynchronous TCP/Banner scanner, SSL/TLS Inspector, and Web Security Analyzer (Security Headers, CORS, Cookie flags, Sensitive Files, Safe SQLi/XSS Probes).
   - [`backend/ai_engine.py`](backend/ai_engine.py): Multi-provider AI Purple Team Analyst (Google Gemini, OpenAI, Anthropic Claude, Ollama/Local + built-in offline heuristic engine).
   - [`backend/report_engine.py`](backend/report_engine.py), [`backend/export_engine.py`](backend/export_engine.py) & [`backend/scheduler.py`](backend/scheduler.py): White-label HTML, editable DOCX, PDF, CSV, and TXT report/export generators + cross-platform cron/interval scan scheduler.

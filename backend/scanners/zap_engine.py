@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import httpx
 
 from backend.scanners.archive_utils import safe_extract_tar, safe_extract_zip, stream_download
+from backend.scanners.tor_engine import validate_proxy_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BIN_DIR = BASE_DIR / "bin"
@@ -426,6 +427,7 @@ async def _run_zap_cli_scan(
     zap_bin: str,
     urls: List[str],
     log: Callable[[str, str], None],
+    proxy_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     all_findings: List[Dict[str, Any]] = []
     zap_dir = Path(zap_bin).resolve().parent
@@ -438,12 +440,36 @@ async def _run_zap_cli_scan(
         env["JAVA_HOME"] = java_home
         env["PATH"] = str(Path(java_bin).resolve().parent) + os.pathsep + env.get("PATH", "")
 
+    proxy_configs: List[str] = []
+    validated_proxy = validate_proxy_url(proxy_url) if proxy_url else None
+    if validated_proxy:
+        p_parsed = urllib.parse.urlparse(validated_proxy)
+        p_scheme = p_parsed.scheme.lower()
+        p_host = p_parsed.hostname or ""
+        p_port = p_parsed.port or (8080 if p_scheme in ("http", "https") else 1080)
+        if p_scheme in ("socks5", "socks5h"):
+            proxy_configs.extend([
+                "-config", "connection.socksProxy.enabled=true",
+                "-config", f"connection.socksProxy.host={p_host}",
+                "-config", f"connection.socksProxy.port={p_port}",
+                "-config", "connection.socksProxy.version=5",
+                "-config", "connection.socksProxy.dns=true",
+            ])
+        else:
+            proxy_configs.extend([
+                "-config", "connection.proxyChain.enabled=true",
+                "-config", f"connection.proxyChain.hostName={p_host}",
+                "-config", f"connection.proxyChain.port={p_port}",
+            ])
+        log("INFO", f"[OWASP ZAP CLI] Outbound proxy attivo ({p_scheme}://{p_host}:{p_port}).")
+
+    cli_timeout = 360.0 if validated_proxy else 240.0
     for u in urls[:4]:
         out_xml = BIN_DIR / f"zap_{os.getpid()}_{uuid.uuid4().hex[:8]}.xml"
         if zap_jars and java_bin:
-            cmd = [java_bin, "-Xmx512m", "-jar", str(zap_jars[0]), "-cmd", "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
+            cmd = [java_bin, "-Xmx512m", "-jar", str(zap_jars[0]), "-cmd", *proxy_configs, "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
         else:
-            cmd = [zap_bin, "-cmd", "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
+            cmd = [zap_bin, "-cmd", *proxy_configs, "-quickurl", u, "-quickout", str(out_xml), "-quickprogress"]
 
         log("INFO", f"[OWASP ZAP CLI] Scansione headless su {u}...")
         try:
@@ -455,11 +481,11 @@ async def _run_zap_cli_scan(
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                await asyncio.wait_for(proc.communicate(), timeout=240.0)
+                await asyncio.wait_for(proc.communicate(), timeout=cli_timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                log("WARN", f"[OWASP ZAP CLI] Timeout su {u} (240s): processo terminato.")
+                log("WARN", f"[OWASP ZAP CLI] Timeout su {u} ({int(cli_timeout)}s): processo terminato.")
                 continue
 
             if out_xml.is_file():
@@ -617,6 +643,7 @@ async def run_zap_scan(
     targets: str,
     zap_mode: str = "baseline",
     log_callback: Optional[Callable[[str, str], Any]] = None,
+    proxy_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     def log(level: str, msg: str):
         if log_callback:
@@ -638,6 +665,8 @@ async def run_zap_scan(
 
     mode = det["mode"]
     if mode == "api":
+        if proxy_url:
+            log("WARN", "[OWASP ZAP API] Modalità daemon esterno rilevata: preferisco CLI locale o avviso proxy non applicato all'istanza API.")
         api_key = os.getenv("URIELSCAN_ZAP_API_KEY", "").strip()
         return await _run_zap_api_scan(det["path"], api_key, urls, zap_mode, log)
-    return await _run_zap_cli_scan(det["path"], urls, log)
+    return await _run_zap_cli_scan(det["path"], urls, log, proxy_url=proxy_url)

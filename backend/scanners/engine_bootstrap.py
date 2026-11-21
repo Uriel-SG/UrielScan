@@ -10,6 +10,7 @@ from typing import Any, Dict
 from backend.scanners.nmap_engine import detect_nmap, install_nmap
 from backend.scanners.nuclei_engine import detect_nuclei, install_nuclei
 from backend.scanners.zap_engine import detect_zap, install_zap
+from backend.scanners.tor_engine import detect_tor, install_tor
 
 _STATE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()
@@ -21,6 +22,7 @@ BOOTSTRAP_STATE: Dict[str, Any] = {
         "nmap": {"status": "idle", "message": ""},
         "nuclei": {"status": "idle", "message": ""},
         "zap": {"status": "idle", "message": ""},
+        "tor": {"status": "idle", "message": ""},
     },
 }
 
@@ -36,7 +38,7 @@ def _set_engine_state(engine: str, status: str, message: str = "") -> None:
 
 
 async def ensure_all_engines(force: bool = False) -> Dict[str, Any]:
-    """Check Nmap, Nuclei, and OWASP ZAP and install any missing engines sequentially."""
+    """Check Nmap, Nuclei, OWASP ZAP, and Tor and install any missing engines sequentially."""
     if not _RUN_LOCK.acquire(blocking=False):
         return get_bootstrap_state()
 
@@ -49,6 +51,7 @@ async def ensure_all_engines(force: bool = False) -> Dict[str, Any]:
             ("nmap", detect_nmap, install_nmap),
             ("nuclei", detect_nuclei, install_nuclei),
             ("zap", detect_zap, install_zap),
+            ("tor", detect_tor, install_tor),
         ]
 
         for name, detect_fn, install_fn in checks:
@@ -88,7 +91,12 @@ def start_engine_bootstrap_background(force: bool = False, allow_in_test: bool =
             return False
 
     missing = []
-    for name, detect_fn in (("nmap", detect_nmap), ("nuclei", detect_nuclei), ("zap", detect_zap)):
+    for name, detect_fn in (
+        ("nmap", detect_nmap),
+        ("nuclei", detect_nuclei),
+        ("zap", detect_zap),
+        ("tor", detect_tor),
+    ):
         det = detect_fn()
         if det.get("installed"):
             _set_engine_state(name, "installed", det.get("version") or "ready")
@@ -118,3 +126,23 @@ def start_engine_bootstrap_background(force: bool = False, allow_in_test: bool =
 
     threading.Thread(target=_worker, daemon=True, name="urielscan-engine-bootstrap").start()
     return True
+
+
+def main() -> int:
+    """CLI entrypoint used by first-time installers to provision all engines synchronously."""
+    state = asyncio.run(ensure_all_engines(force=False))
+    engines = state.get("engines", {})
+    all_ok = True
+    print("\n=== UrielScan Engines Provisioning Summary ===")
+    for name in ("nmap", "nuclei", "zap", "tor"):
+        info = engines.get(name, {})
+        st = info.get("status", "unknown")
+        msg = info.get("message", "")
+        print(f"  - {name:<7}: {st.upper():<9} {msg}")
+        if st != "installed":
+            all_ok = False
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -41,6 +41,15 @@ from backend.auth import (
 from backend.scanners.nmap_engine import detect_nmap, get_nse_catalog, install_nmap
 from backend.scanners.nuclei_engine import detect_nuclei, install_nuclei
 from backend.scanners.zap_engine import detect_zap, install_zap
+from backend.scanners.tor_engine import (
+    detect_tor,
+    install_tor,
+    ensure_tor_running,
+    stop_tor_daemon,
+    rotate_tor_circuit,
+    get_proxy_exit_ip,
+    validate_proxy_url,
+)
 from backend.scanners.engine_bootstrap import get_bootstrap_state, start_engine_bootstrap_background
 from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.orchestrator import start_scan_in_background, stop_scan
@@ -70,6 +79,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     shutdown_scheduler()
+    await stop_tor_daemon()
 
 
 app = FastAPI(
@@ -218,6 +228,12 @@ class ScanCreateModel(BaseModel):
     web_checks: Optional[List[str]] = None
     zap_mode: Optional[str] = "baseline"
     agent_id: Optional[int | str] = None
+    onion_mode: Optional[bool] = False
+    proxy_url: Optional[str] = None
+
+
+class ProxyTestRequest(BaseModel):
+    proxy_url: str = Field(..., min_length=1)
 
 
 class AgentCreateModel(BaseModel):
@@ -333,6 +349,7 @@ async def get_system_status():
     nmap_info = detect_nmap()
     nuclei_info = detect_nuclei()
     zap_info = detect_zap()
+    tor_info = detect_tor()
 
     return {
         "status": "healthy",
@@ -350,7 +367,8 @@ async def get_system_status():
             },
             "nmap": nmap_info,
             "nuclei": nuclei_info,
-            "zap": zap_info
+            "zap": zap_info,
+            "tor": tor_info,
         },
         "bootstrap": get_bootstrap_state(),
     }
@@ -369,6 +387,49 @@ async def install_nuclei_endpoint():
 @app.post("/api/system/install-zap")
 async def install_zap_endpoint():
     return await install_zap()
+
+
+@app.post("/api/system/install-tor")
+async def install_tor_endpoint():
+    return await install_tor()
+
+
+@app.post("/api/system/tor/start")
+async def start_tor_endpoint():
+    res = await ensure_tor_running(timeout=90.0)
+    if not res.get("ok"):
+        raise HTTPException(status_code=500, detail=res.get("error", "Tor startup failed."))
+    exit_info = await get_proxy_exit_ip(res["proxy_url"], timeout=15.0)
+    return {**res, **exit_info, "tor": detect_tor()}
+
+
+@app.post("/api/system/tor/stop")
+async def stop_tor_endpoint():
+    res = await stop_tor_daemon()
+    return {**res, "tor": detect_tor()}
+
+
+@app.post("/api/system/tor/new-identity")
+async def tor_new_identity_endpoint():
+    res = await ensure_tor_running(timeout=90.0)
+    if not res.get("ok"):
+        raise HTTPException(status_code=500, detail=res.get("error", "Tor is not running."))
+    rot = await rotate_tor_circuit(int(res.get("control_port", 19051)))
+    if not rot.get("ok"):
+        raise HTTPException(status_code=500, detail=rot.get("error", "Circuit rotation failed."))
+    exit_info = await get_proxy_exit_ip(res["proxy_url"], timeout=18.0)
+    return {**rot, **exit_info, "tor": detect_tor()}
+
+
+@app.post("/api/system/proxy/test")
+async def test_proxy_endpoint(payload: ProxyTestRequest):
+    try:
+        validated = validate_proxy_url(payload.proxy_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not validated:
+        raise HTTPException(status_code=400, detail="Proxy URL is required.")
+    return await get_proxy_exit_ip(validated, timeout=15.0)
 
 
 @app.post("/api/system/install-all-engines")
@@ -797,6 +858,16 @@ async def create_and_start_scan(payload: ScanCreateModel):
         cfg["web_checks"] = payload.web_checks
     if payload.zap_mode and "zap_mode" not in cfg:
         cfg["zap_mode"] = payload.zap_mode
+    if payload.onion_mode is not None:
+        cfg["onion_mode"] = bool(payload.onion_mode)
+    raw_proxy = payload.proxy_url if payload.proxy_url is not None else cfg.get("proxy_url")
+    if raw_proxy is not None and str(raw_proxy).strip():
+        try:
+            cfg["proxy_url"] = validate_proxy_url(str(raw_proxy))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    elif "proxy_url" in cfg:
+        cfg.pop("proxy_url", None)
 
     profile = payload.scan_type or payload.scan_profile or "standard"
 

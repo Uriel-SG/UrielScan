@@ -1225,7 +1225,7 @@ def test_engine_auto_bootstrap_and_install_endpoints(tmp_path, monkeypatch):
     status_data = raw_client.get("/api/system/status").json()
     assert "bootstrap" in status_data
     assert "engines" in status_data["bootstrap"]
-    for eng in ("nmap", "nuclei", "zap"):
+    for eng in ("nmap", "nuclei", "zap", "tor"):
         assert eng in status_data["bootstrap"]["engines"]
 
     # 2. Portable detection for Nmap & OWASP ZAP inside temporary BIN_DIR
@@ -1284,8 +1284,159 @@ def test_engine_auto_bootstrap_and_install_endpoints(tmp_path, monkeypatch):
     except ValueError as exc:
         assert "Unsafe ZIP path" in str(exc)
 
+    # 5. First-time installers & fast launchers exist with LF line endings on shell scripts
+    for fname in ("install.bat", "install.ps1", "install.sh", "start.bat", "start.sh"):
+        fpath = ROOT_DIR / fname
+        assert fpath.is_file(), f"Missing {fname}"
+    for sh_name in ("install.sh", "start.sh"):
+        raw_bytes = (ROOT_DIR / sh_name).read_bytes()
+        assert b"\r\n" not in raw_bytes, f"{sh_name} must use pure Unix LF line endings"
 
 
 
 
 
+
+
+
+def test_tor_onion_routing_and_socks5_tunnel(monkeypatch):
+    import asyncio
+    import struct
+    import backend.main as main_mod
+    from backend.scanners import tor_engine, native_engine, nmap_engine
+
+    # 1. URL validation & socks5 -> socks5h upgrade (remote DNS resolution)
+    assert tor_engine.validate_proxy_url("socks5://127.0.0.1:9050") == "socks5://127.0.0.1:9050"
+    assert tor_engine.to_httpx_proxy_url("socks5://127.0.0.1:9050") == "socks5h://127.0.0.1:9050"
+    assert tor_engine.validate_proxy_url("socks5h://user:p%40ss@10.0.0.5:1080") == "socks5h://user:p%40ss@10.0.0.5:1080"
+    assert tor_engine.validate_proxy_url("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+    for bad in ("ftp://127.0.0.1:21", "socks5://:1080", "http://127.0.0.1:99999", "socks5://127.0.0.1:9050\r\n"):
+        with pytest.raises(ValueError):
+            tor_engine.validate_proxy_url(bad)
+
+    # 2. Local RFC 1928 SOCKS5 server + fake .onion HTTP target tunnel verification
+    recorded_atyp = []
+    recorded_hosts = []
+
+    async def _run_socks5_e2e():
+        async def handle_target(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            try:
+                await asyncio.wait_for(reader.read(1024), timeout=2.0)
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Server: OnionTestServer/1.0\r\n"
+                    b"Content-Length: 2\r\n\r\nOK"
+                )
+                await writer.drain()
+            finally:
+                writer.close()
+
+        target_srv = await asyncio.start_server(handle_target, "127.0.0.1", 0)
+        target_port = target_srv.sockets[0].getsockname()[1]
+
+        async def handle_socks5(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            upstream_writer = None
+            try:
+                ver_n = await reader.readexactly(2)
+                assert ver_n[0] == 5
+                await reader.readexactly(ver_n[1])
+                writer.write(b"\x05\x00")
+                await writer.drain()
+
+                req_hdr = await reader.readexactly(4)
+                atyp = req_hdr[3]
+                recorded_atyp.append(atyp)
+                if atyp == 0x03:
+                    dlen = (await reader.readexactly(1))[0]
+                    host_b = await reader.readexactly(dlen)
+                    recorded_hosts.append(host_b.decode("ascii", errors="replace"))
+                elif atyp == 0x01:
+                    await reader.readexactly(4)
+                dst_port = struct.unpack("!H", await reader.readexactly(2))[0]
+
+                up_r, upstream_writer = await asyncio.open_connection("127.0.0.1", dst_port)
+                writer.write(b"\x05\x00\x00\x01\x7f\x00\x00\x01" + struct.pack("!H", dst_port))
+                await writer.drain()
+
+                async def _pipe(src, dst):
+                    try:
+                        while True:
+                            chunk = await src.read(4096)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                            await dst.drain()
+                    except Exception:
+                        pass
+
+                await asyncio.gather(_pipe(reader, upstream_writer), _pipe(up_r, writer))
+            finally:
+                writer.close()
+                if upstream_writer:
+                    upstream_writer.close()
+
+        socks_srv = await asyncio.start_server(handle_socks5, "127.0.0.1", 0)
+        socks_port = socks_srv.sockets[0].getsockname()[1]
+
+        try:
+            proxy_url = f"socks5h://127.0.0.1:{socks_port}"
+            hosts, findings = await native_engine.run_native_net_scan(
+                "fake-hidden-service.onion",
+                ports=[target_port],
+                proxy_url=proxy_url,
+            )
+            assert len(hosts) == 1
+            assert hosts[0]["ports"][0]["port"] == target_port
+            assert 0x03 in recorded_atyp
+            assert "fake-hidden-service.onion" in recorded_hosts
+
+            web_findings = await native_engine.run_native_web_scan(
+                f"http://127.0.0.1:{target_port}",
+                discovered_hosts=hosts,
+                proxy_url=proxy_url,
+            )
+            assert len(web_findings) > 0
+        finally:
+            socks_srv.close()
+            target_srv.close()
+            await socks_srv.wait_closed()
+            await target_srv.wait_closed()
+
+    asyncio.run(_run_socks5_e2e())
+
+    # 3. Nmap leak guard in onion/proxy mode when torsocks unavailable
+    monkeypatch.setattr(nmap_engine, "detect_nmap", lambda: {"installed": True, "version": "7.95", "path": "nmap"})
+    monkeypatch.setattr(nmap_engine.shutil, "which", lambda *a, **kw: None)
+    nmap_skipped = asyncio.run(
+        nmap_engine.run_nmap_scan("example.com", onion_mode=True, proxy_url="socks5h://127.0.0.1:19050")
+    )
+    assert nmap_skipped.get("skipped_for_proxy") is True
+    assert nmap_skipped["hosts"] == []
+
+    # 4. System status, proxy test validation, and /api/scans onion_mode persistence
+    status_data = client.get("/api/system/status").json()
+    assert "tor" in status_data["engines"]
+
+    bad_test = client.post("/api/system/proxy/test", json={"proxy_url": "ftp://invalid:21"})
+    assert bad_test.status_code == 400
+
+    bad_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Bad Proxy Scan",
+        "targets": "example.com",
+        "engines": ["native_net"],
+        "proxy_url": "ftp://invalid:21",
+    })
+    assert bad_scan.status_code == 400
+
+    monkeypatch.setattr(main_mod, "start_scan_in_background", lambda scan_id: None)
+    ok_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Onion Scan Config Test",
+        "targets": "example.com",
+        "engines": ["native_web"],
+        "onion_mode": True,
+    })
+    assert ok_scan.status_code == 201
+    created = ok_scan.json()
+    assert created["config"].get("onion_mode") is True

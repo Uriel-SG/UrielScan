@@ -711,11 +711,24 @@ async def run_nmap_scan(
     ports: Optional[str] = None,
     nmap_flags: Optional[Any] = None,
     nse_scripts: Optional[List[str]] = None,
-    log_callback: Optional[Callable[[str, str], Any]] = None
+    log_callback: Optional[Callable[[str, str], Any]] = None,
+    onion_mode: bool = False,
+    proxy_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     detection = detect_nmap()
     if not detection["installed"]:
         raise RuntimeError("Nmap non è installato sul sistema o non è raggiungibile.")
+
+    if onion_mode or proxy_url:
+        # Nmap SYN/Connect port discovery cannot reliably tunnel over SOCKS5/HTTP proxies without risking real-IP leaks.
+        use_torsocks = bool(onion_mode and platform.system() != "Windows" and shutil.which("torsocks"))
+        if not use_torsocks:
+            if log_callback:
+                try:
+                    log_callback("INFO", "[Nmap Engine] Saltato in modalità Onion/Proxy per prevenire DNS/IP leak: port scan eseguito via tunnel SOCKS5 Native Net.")
+                except Exception:
+                    pass
+            return {"hosts": [], "findings": [], "skipped_for_proxy": True}
 
     def log(level: str, msg: str):
         if log_callback:
@@ -844,7 +857,7 @@ async def run_nmap_scan(
     # 2-Stage Smart Subnet Discovery: if scanning a CIDR subnet (/24) or range,
     # run fast ARP/ICMP Host Discovery (-sn) first so we don't waste 15 minutes port-scanning 240 dead IPs!
     discovered_hosts_meta: Dict[str, Dict[str, str]] = {}
-    if has_subnet_or_range:
+    if has_subnet_or_range and not (onion_mode or proxy_url):
         sn_args = [nmap_bin, "-sn", "-oX", "-", "--"] + raw_targets
         log("INFO", f"[Nmap Subnet Discovery] Ricerca host attivi sulla rete ({', '.join(raw_targets)})...")
         try:
@@ -924,6 +937,19 @@ async def run_nmap_scan(
 
     args.append("--")
     args.extend(raw_targets)
+
+    if onion_mode and platform.system() != "Windows":
+        torsocks_bin = shutil.which("torsocks")
+        if torsocks_bin:
+            # Force unprivileged TCP connect scan with -Pn -n under torsocks to avoid DNS/SYN leaks
+            safe_args = [a for a in args if a not in ("-sS", "-O", "-A")]
+            if "-sT" not in safe_args:
+                safe_args.insert(1, "-sT")
+            if "-Pn" not in safe_args:
+                safe_args.insert(1, "-Pn")
+            if "-n" not in safe_args:
+                safe_args.insert(1, "-n")
+            args = [torsocks_bin] + safe_args
 
     cmd_str = " ".join(args)
     log("INFO", f"Avvio esecuzione Nmap: {cmd_str}")

@@ -113,6 +113,10 @@ function normalizeScan(raw: any): Scan {
     nuclei_tags: raw.nuclei_tags || cfg.nuclei_tags || [],
     nuclei_severity: raw.nuclei_severity || cfg.nuclei_severities || [],
     web_checks: raw.web_checks || cfg.web_checks || [],
+    zap_mode: raw.zap_mode || cfg.zap_mode || 'baseline',
+    onion_mode: Boolean(cfg.onion_mode),
+    proxy_url: cfg.proxy_url || undefined,
+    routing: sum.routing || undefined,
     status: (raw.status || 'pending') as Scan['status'],
     progress: typeof raw.progress === 'number' ? raw.progress : 0,
     started_at: raw.started_at || new Date().toISOString(),
@@ -487,6 +491,15 @@ export const api = {
               version: raw.engines.zap?.version || undefined,
               mode: raw.engines.zap?.mode || undefined,
             },
+            tor: {
+              available: Boolean(raw.engines.tor?.installed ?? raw.engines.tor?.available ?? false),
+              installed: Boolean(raw.engines.tor?.installed ?? false),
+              version: raw.engines.tor?.version || undefined,
+              running: Boolean(raw.engines.tor?.running ?? false),
+              socks_port: raw.engines.tor?.socks_port,
+              control_port: raw.engines.tor?.control_port,
+              proxy_url: raw.engines.tor?.proxy_url || undefined,
+            },
             native: {
               available: true,
             },
@@ -507,6 +520,7 @@ export const api = {
       nmap: { available: false, version: 'Non rilevato', scripts_count: 0 },
       nuclei: { available: false },
       zap: { available: false },
+      tor: { available: false, installed: false, running: false },
       native: { available: true },
       ai: { configured: false, provider: 'None', model: '' }
     };
@@ -541,6 +555,65 @@ export const api = {
     });
     if (!res.ok) {
       throw new Error('Installazione OWASP ZAP fallita');
+    }
+    return await res.json();
+  },
+
+  async installTor(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-tor`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Installazione Tor fallita');
+    }
+    return await res.json();
+  },
+
+  async startTor(): Promise<{ ok: boolean; ip?: string; is_tor?: boolean; proxy_url?: string; error?: string; tor?: EngineStatus['tor'] }> {
+    const res = await fetch(`${API_BASE}/system/tor/start`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Avvio demone Tor fallito' }));
+      throw new Error(err.detail || 'Avvio demone Tor fallito');
+    }
+    return await res.json();
+  },
+
+  async stopTor(): Promise<{ ok: boolean; stopped?: boolean; message?: string; tor?: EngineStatus['tor'] }> {
+    const res = await fetch(`${API_BASE}/system/tor/stop`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      throw new Error('Arresto demone Tor fallito');
+    }
+    return await res.json();
+  },
+
+  async newTorIdentity(): Promise<{ ok: boolean; ip?: string; is_tor?: boolean; message?: string; error?: string; tor?: EngineStatus['tor'] }> {
+    const res = await fetch(`${API_BASE}/system/tor/new-identity`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Rotazione circuito Tor fallita' }));
+      throw new Error(err.detail || 'Rotazione circuito Tor fallita');
+    }
+    return await res.json();
+  },
+
+  async testProxy(proxyUrl: string): Promise<{ ok: boolean; ip?: string; is_tor?: boolean; proxy_url?: string; error?: string }> {
+    const res = await fetch(`${API_BASE}/system/proxy/test`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify({ proxy_url: proxyUrl })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Test proxy fallito' }));
+      throw new Error(err.detail || 'Test proxy fallito');
     }
     return await res.json();
   },
@@ -628,6 +701,8 @@ export const api = {
     nuclei_severity?: string[];
     web_checks?: string[];
     zap_mode?: 'baseline' | 'full';
+    onion_mode?: boolean;
+    proxy_url?: string;
   }): Promise<Scan> {
     const res = await fetch(`${API_BASE}/scans`, {
       method: 'POST',

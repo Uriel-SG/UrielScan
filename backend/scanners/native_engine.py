@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import httpx
 
+from backend.scanners.tor_engine import open_proxied_connection, to_httpx_proxy_url
+
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 88, 110, 111, 135, 139, 143, 389, 443, 445,
     465, 587, 636, 993, 995, 1433, 1521, 2049, 3000, 3306, 3389, 5000,
@@ -199,10 +201,19 @@ def _generate_native_port_finding(host: str, port: int, banner: str, service: st
 # 1. NETWORK SCAN MODULE
 # ==========================================
 
-async def probe_port(ip: str, port: int, timeout: float = 1.5) -> Tuple[bool, str]:
-    conn_coro = asyncio.open_connection(ip, port)
+async def probe_port(
+    ip: str,
+    port: int,
+    timeout: float = 1.5,
+    proxy_url: Optional[str] = None,
+) -> Tuple[bool, str]:
     try:
-        reader, writer = await asyncio.wait_for(conn_coro, timeout=timeout)
+        if proxy_url:
+            eff_timeout = max(timeout, 6.0)
+            reader, writer = await open_proxied_connection(ip, port, proxy_url, timeout=eff_timeout)
+        else:
+            conn_coro = asyncio.open_connection(ip, port)
+            reader, writer = await asyncio.wait_for(conn_coro, timeout=timeout)
     except Exception:
         return False, ""
 
@@ -221,7 +232,7 @@ async def probe_port(ip: str, port: int, timeout: float = 1.5) -> Tuple[bool, st
         await writer.drain()
 
         read_coro = reader.read(1024)
-        data = await asyncio.wait_for(read_coro, timeout=1.2)
+        data = await asyncio.wait_for(read_coro, timeout=2.5 if proxy_url else 1.2)
         banner = data.decode("utf-8", errors="replace").strip()
     except Exception:
         pass
@@ -238,7 +249,8 @@ async def probe_port(ip: str, port: int, timeout: float = 1.5) -> Tuple[bool, st
 async def run_native_net_scan(
     targets: str,
     ports: Optional[List[int]] = None,
-    log_callback: Optional[Callable[[str, str], Any]] = None
+    log_callback: Optional[Callable[[str, str], Any]] = None,
+    proxy_url: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     def log(level: str, msg: str):
         if log_callback:
@@ -289,28 +301,38 @@ async def run_native_net_scan(
     hosts = []
     findings = []
 
-    sem = asyncio.Semaphore(50)
+    sem = asyncio.Semaphore(12 if proxy_url else 50)
 
     for target in raw_targets:
         # Clean target if it has URL scheme
         clean_host = target.replace("http://", "").replace("https://", "").split("/")[0].split(":")[0]
-        log("INFO", f"[Native Net] Risoluzione DNS per {clean_host}...")
+        if proxy_url:
+            # Skip local DNS resolution to prevent DNS leaks and support .onion targets
+            ip_addr = clean_host
+            log("INFO", f"[Native Net] Scansione TCP porte proxied su {clean_host} (risoluzione DNS remota)...")
+        else:
+            log("INFO", f"[Native Net] Risoluzione DNS per {clean_host}...")
 
-        try:
-            loop = asyncio.get_running_loop()
-            addr_info = await loop.getaddrinfo(clean_host, None)
-            ip_addr = addr_info[0][4][0]
-        except Exception as e:
-            log("WARN", f"[Native Net] Impossibile risolvere host {clean_host}: {str(e)}")
-            continue
+            try:
+                loop = asyncio.get_running_loop()
+                addr_info = await loop.getaddrinfo(clean_host, None)
+                ip_addr = addr_info[0][4][0]
+            except Exception as e:
+                log("WARN", f"[Native Net] Impossibile risolvere host {clean_host}: {str(e)}")
+                continue
 
-        log("INFO", f"[Native Net] Scansione TCP porte su {clean_host} ({ip_addr})...")
+            log("INFO", f"[Native Net] Scansione TCP porte su {clean_host} ({ip_addr})...")
 
         open_ports = []
 
         async def check_p(p: int):
             async with sem:
-                is_open, banner = await probe_port(ip_addr, p)
+                is_open, banner = await probe_port(
+                    ip_addr,
+                    p,
+                    timeout=6.0 if proxy_url else 1.5,
+                    proxy_url=proxy_url,
+                )
                 if is_open:
                     service_name = PORT_SERVICE_MAP.get(p, f"port-{p}")
                     open_ports.append({
@@ -350,7 +372,8 @@ async def run_native_net_scan(
 
 async def run_native_ssl_scan(
     targets: str,
-    log_callback: Optional[Callable[[str, str], Any]] = None
+    log_callback: Optional[Callable[[str, str], Any]] = None,
+    proxy_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     findings = []
     raw_targets = [t.strip() for t in targets.replace(",", " ").split() if t.strip()]
@@ -369,22 +392,48 @@ async def run_native_ssl_scan(
         port = 443
         log("INFO", f"[Native SSL] Ispezione SSL/TLS per {clean_host}:{port}...")
 
-        def _sync_ssl_check():
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+        if proxy_url:
             try:
-                with socket.create_connection((clean_host, port), timeout=3.0) as sock:
-                    with ctx.wrap_socket(sock, server_hostname=clean_host) as ssock:
-                        cert = ssock.getpeercert(binary_form=False)
-                        cipher = ssock.cipher()
-                        version = ssock.version()
-                        return True, cert, cipher, version, None
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                _, tls_writer = await open_proxied_connection(
+                    clean_host,
+                    port,
+                    proxy_url,
+                    timeout=8.0,
+                    use_tls=True,
+                    ssl_context=ctx,
+                )
+                ssl_obj = tls_writer.get_extra_info("ssl_object")
+                cert = ssl_obj.getpeercert(binary_form=False) if ssl_obj else None
+                cipher = ssl_obj.cipher() if ssl_obj else None
+                version = ssl_obj.version() if ssl_obj else None
+                success, err = True, None
+                tls_writer.close()
+                try:
+                    await tls_writer.wait_closed()
+                except Exception:
+                    pass
             except Exception as e:
-                return False, None, None, None, str(e)
+                success, cert, cipher, version, err = False, None, None, None, str(e)
+        else:
+            def _sync_ssl_check():
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                try:
+                    with socket.create_connection((clean_host, port), timeout=3.0) as sock:
+                        with ctx.wrap_socket(sock, server_hostname=clean_host) as ssock:
+                            cert = ssock.getpeercert(binary_form=False)
+                            cipher = ssock.cipher()
+                            version = ssock.version()
+                            return True, cert, cipher, version, None
+                except Exception as e:
+                    return False, None, None, None, str(e)
 
-        loop = asyncio.get_running_loop()
-        success, cert, cipher, version, err = await loop.run_in_executor(None, _sync_ssl_check)
+            loop = asyncio.get_running_loop()
+            success, cert, cipher, version, err = await loop.run_in_executor(None, _sync_ssl_check)
 
         if not success:
             continue
@@ -422,7 +471,8 @@ async def run_native_ssl_scan(
 async def run_native_web_scan(
     targets: str,
     discovered_hosts: Optional[List[Dict[str, Any]]] = None,
-    log_callback: Optional[Callable[[str, str], Any]] = None
+    log_callback: Optional[Callable[[str, str], Any]] = None,
+    proxy_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     findings = []
     raw_targets = [t.strip() for t in targets.replace(",", " ").split() if t.strip()]
@@ -460,10 +510,13 @@ async def run_native_web_scan(
                             if url_cand not in urls_to_test:
                                 urls_to_test.append(url_cand)
 
+    httpx_proxy = to_httpx_proxy_url(proxy_url) if proxy_url else None
+    client_timeout = httpx.Timeout(18.0, connect=12.0) if httpx_proxy else httpx.Timeout(5.0)
     # Use a resilient httpx client
     async with httpx.AsyncClient(
+        proxy=httpx_proxy,
         verify=False,
-        timeout=5.0,
+        timeout=client_timeout,
         follow_redirects=True,
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) UrielScan/1.0 PurpleTeam"}
     ) as client:
@@ -479,6 +532,13 @@ async def run_native_web_scan(
             port = parsed_u.port or (443 if base_url.startswith("https://") else 80)
 
             headers = {k.lower(): v for k, v in resp.headers.items()}
+            if httpx_proxy and resp.status_code in (403, 429, 503):
+                body_head = (resp.text[:1500] if resp.text else "").lower()
+                if "cf-ray" in headers or "cloudflare" in body_head or "captcha" in body_head or "just a moment" in body_head:
+                    log(
+                        "WARN",
+                        f"[Native Web] Rilevato possibile blocco WAF/Cloudflare/CAPTCHA via Exit Node su {base_url} (HTTP {resp.status_code}). Ruota il circuito Tor o usa un proxy dedicato.",
+                    )
 
             # 1. Security Headers Audit
             missing_headers = []
