@@ -12,6 +12,8 @@ data/*.db*
 data/*.sqlite*
 data/.session_secret
 data/tor_data/
+data/*.pid
+data/*.log
 reports/*.html
 reports/*.pdf
 reports/*.docx

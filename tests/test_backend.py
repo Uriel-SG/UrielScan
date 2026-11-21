@@ -1284,13 +1284,35 @@ def test_engine_auto_bootstrap_and_install_endpoints(tmp_path, monkeypatch):
     except ValueError as exc:
         assert "Unsafe ZIP path" in str(exc)
 
-    # 5. First-time installers & fast launchers exist with LF line endings on shell scripts
-    for fname in ("install.bat", "install.ps1", "install.sh", "start.bat", "start.sh"):
+    # 5. First-time installers, silent launchers, stop script & LF line endings on shell scripts
+    for fname in ("install.bat", "install.ps1", "install.sh", "start.bat", "start.sh", "stop.bat"):
         fpath = ROOT_DIR / fname
         assert fpath.is_file(), f"Missing {fname}"
     for sh_name in ("install.sh", "start.sh"):
         raw_bytes = (ROOT_DIR / sh_name).read_bytes()
         assert b"\r\n" not in raw_bytes, f"{sh_name} must use pure Unix LF line endings"
+
+    # 6. run.py handles windowless pythonw.exe streams (sys.stdout/stderr is None)
+    import run as run_mod
+    fake_log = tmp_path / "windowless_urielscan.log"
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    try:
+        monkeypatch.setattr(run_mod, "LOG_FILE", fake_log)
+        sys.stdout = None
+        sys.stderr = None
+        run_mod._configure_windowless_streams()
+        assert sys.stdout is not None and sys.stderr is not None
+        print("windowless stream check ok")
+    finally:
+        for stream in (sys.stdout, sys.stderr):
+            if stream not in (orig_stdout, orig_stderr) and hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
+    assert "windowless stream check ok" in fake_log.read_text(encoding="utf-8")
 
 
 

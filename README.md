@@ -2,7 +2,7 @@
 
 <img width="376" height="256" alt="urielscan-logo" src="https://github.com/user-attachments/assets/415d8f3d-b0e9-4a8f-b2a6-83ac81155a37" />
 
-**UrielScan** is an open-source Vulnerability Assessment & Purple Team platform designed to combine **Network Scanning (Nmap + NSE)** and **Web Application Security Testing (Nuclei + OWASP/ZAP-like Native Audit)** in a single modern, multi-theme web interface tailored for **MSP/MSSP** operations (multi-organization management, remote client probes, bilingual `EN / IT` UI, and white-label dual-logo reporting).
+**UrielScan** is an open-source Vulnerability Assessment & Purple Team platform designed to combine **Network Scanning (Nmap + NSE)**, **Web Vulnerability Scanning (Nuclei + OWASP ZAP)**, and an **Asynchronous Native Engine** with cross-engine deduplication, **Tor Onion / Custom SOCKS5-HTTP Proxy routing**, **NAT Loopback Guard**, **Self-Contained Remote Probe Installers (`.msi` / `.sh`)**, bilingual `EN / IT` multi-theme UI, and white-label dual-logo reporting for **MSP/MSSP** operations.
 
 ## Quick Start (Windows & Linux)
 
@@ -18,36 +18,57 @@
   chmod +x install.sh && ./install.sh
   ```
 
-### 2. Launch Application
-- **Windows**: `start.bat` (or `.venv\Scripts\python.exe run.py`)
+### 2. Launch & Stop Application
+- **Windows**: Double-click `start.bat` — launches UrielScan silently in the background via `pythonw.exe` (no console window kept open), logs to `data/urielscan.log`, and automatically opens your browser once ready. Run `stop.bat` to stop it (or `start.bat --console` for visible terminal logs).
 - **Linux / macOS**: `./start.sh` (or `.venv/bin/python run.py`)
 
 Once started, the UrielScan dashboard is available in your browser at **`http://localhost:8000`** (OpenAPI documentation is available at `http://localhost:8000/docs`).
 
 ## Remote Probe Agent (MSP Client Networks)
 
-To scan internal client networks without opening inbound firewall ports or encountering RFC1918 subnet conflicts, UrielScan includes a standalone **Outbound Pull Remote Probe** ([`agent/urielscan_probe.py`](agent/urielscan_probe.py)):
+To scan internal client networks without opening inbound firewall ports or encountering RFC1918 subnet conflicts, UrielScan includes **Outbound Pull Remote Probes**:
 
-1. **Enroll a Probe**: Go to **Settings → Remote Probes**, select the target organization, generate an **Agent Token**, and download `urielscan_probe.py`.
-2. **Run on Client Network** (Python 3.10+ stdlib only, optional local `nmap` / `nuclei`):
-   ```bash
-   python urielscan_probe.py --server https://your-urielscan-domain.com --token <AGENT_TOKEN>
-   ```
-   - For local/LAN testing, start UrielScan with `python run.py --host 0.0.0.0` and point `--server` to your server LAN IP (e.g., `http://192.168.1.50:8000`).
-   - For external client networks, expose UrielScan behind an **HTTPS Reverse Proxy** (Nginx, Caddy, Traefik) or a secure tunnel (Cloudflare Tunnel / WireGuard).
-3. **Launch Remote Scans**: In **New Scan Studio**, select the client's registered probe under **Execution Probe** and start the scan as usual.
+1. **Enroll a Probe**: Go to **Settings → Remote Probes**, select the target organization, and create a probe to generate an **Agent Token**.
+2. **Deploy on Client Hosts (Zero Manual Python Setup Required)**:
+   - **Windows Self-Contained `.msi`**: Downloads an MSI package containing an embedded Python runtime, Windows background service registration, and pre-configured Server URL + Agent Token — ready for GUI install or silent RMM deployment (`msiexec /i ... /qn`).
+   - **Linux Self-Contained `.sh`**: Downloads a standalone Bash installer with embedded payload, registers a persistent `systemd` service, and supports one-line remote RMM execution (`curl -fsSL ... | sudo bash`) via time-limited HMAC-signed download links.
+   - **Standalone Script (Fallback)**: Alternatively, run [`agent/urielscan_probe.py`](agent/urielscan_probe.py) directly on Python 3.10+ (stdlib only):
+     ```bash
+     python urielscan_probe.py --server https://your-urielscan-domain.com --token <AGENT_TOKEN>
+     ```
+3. **Launch Remote Scans**: In **New Scan Studio**, select the client's registered probe under **Execution Probe** and launch the scan as usual. For external networks, expose UrielScan behind an **HTTPS Reverse Proxy** (Nginx, Caddy, Traefik) or a secure tunnel (Cloudflare Tunnel / WireGuard).
+
+## Outbound Network Routing (Tor Onion & Custom Proxy)
+
+In **New Scan Studio → Outbound Network Routing** (local scans), choose between:
+- **Direct (Local IP)**: Standard egress and internal LAN/subnet scanning.
+- **Onion Routing (Tor)**: Launches the managed Tor Expert Bundle (`socks5h://127.0.0.1:19050` / ControlPort `19051`), supports `.onion` services, verifies Tor Exit IP, supports one-click **New Circuit (`SIGNAL NEWNYM`)**, and enforces fail-closed leak protection (direct Nmap is skipped or wrapped safely with `torsocks` on Unix while Native Net runs TCP/Banner probes over SOCKS5).
+- **Custom SOCKS5 / HTTP Proxy**: Route Native TCP/SSL/Web, Nuclei, and OWASP ZAP traffic through an external VPS SSH/SOCKS5 tunnel, WireGuard gateway, or HTTP proxy (`socks5h://`, `socks5://`, `http://`, `https://`) with live Exit IP verification.
+
+## NAT Loopback Guard & Cross-Engine Deduplication
+
+- **NAT Loopback Guard**: Automatically detects when a public IP/domain target resolves to your local WAN egress IP, queries external WAN exposure via Shodan InternetDB, and suppresses false-positive internal router hairpinning findings.
+- **Cross-Engine Deduplication**: Consolidates overlapping findings reported across Nmap, Native Net/SSL/Web, Nuclei, and OWASP ZAP into unified severity-ordered results.
+
+## Reporting, AI Analyst & Archive
+
+- **White-Label Reports & Exports**: Generate **HTML**, **PDF**, **DOCX**, **CSV**, and **TXT** reports with Provider + Client dual branding and persistent Saved Report history.
+- **Purple Team AI Analyst**: Supports **Google Gemini**, **OpenAI**, **Anthropic Claude**, **Ollama (Local)**, and a built-in **Offline Heuristic Engine**, with persistent Saved AI Analyses history and executive/single-finding insights.
+- **Authentication**: Admin login (`admin:admin` on first boot) with optional **2FA TOTP (RFC 6238)** QR setup and password management.
 
 ## Core Architecture
 - **Backend & Scanners (`backend/`)**:
-  - [`backend/main.py`](backend/main.py): FastAPI server + SPA mount + REST API (including Auth, 2FA TOTP, and Remote Agent endpoints).
-  - [`backend/scanners/nmap_engine.py`](backend/scanners/nmap_engine.py): Native Nmap integration + system `.nse` script indexing + ZenMap++ scan profiles.
-  - [`backend/scanners/nuclei_engine.py`](backend/scanners/nuclei_engine.py): Nuclei integration with cross-platform auto-downloader from official GitHub Releases.
-  - [`backend/scanners/zap_engine.py`](backend/scanners/zap_engine.py): OWASP ZAP integration (Daemon API / CLI + portable Temurin JRE 17 auto-provisioning) with cross-engine deduplication.
-  - [`backend/scanners/tor_engine.py`](backend/scanners/tor_engine.py): Managed Tor Expert Bundle lifecycle, SOCKS5h/HTTP CONNECT tunneling, exit IP verification, and circuit rotation.
-  - [`backend/scanners/engine_bootstrap.py`](backend/scanners/engine_bootstrap.py): Unified auto-provisioning engine for Nmap, Nuclei, OWASP ZAP, and Tor (`bin/`).
-  - [`backend/scanners/native_engine.py`](backend/scanners/native_engine.py): Asynchronous TCP/Banner scanner, SSL/TLS Inspector, and Web Security Analyzer (Security Headers, CORS, Cookie flags, Sensitive Files, Safe SQLi/XSS Probes).
-  - [`backend/ai_engine.py`](backend/ai_engine.py): Multi-provider AI Purple Team Analyst (Google Gemini, OpenAI, Anthropic Claude, Ollama/Local + built-in offline heuristic engine).
-  - [`backend/report_engine.py`](backend/report_engine.py), [`backend/export_engine.py`](backend/export_engine.py) & [`backend/scheduler.py`](backend/scheduler.py): White-label HTML, editable DOCX, PDF, CSV, and TXT report/export generators + cross-platform cron/interval scan scheduler.
+  - [`backend/main.py`](backend/main.py): FastAPI server, SPA mount, REST API, Auth/2FA TOTP, Tor/Proxy controls, and Remote Probe endpoints.
+  - [`backend/probe_packager.py`](backend/probe_packager.py): Builds self-contained Windows `.msi` and Linux `.sh` remote probe installers and time-limited signed RMM download URLs.
+  - [`backend/scanners/orchestrator.py`](backend/scanners/orchestrator.py): Hybrid scan pipeline orchestrator with Tor/Proxy fail-closed routing and NAT Loopback filtering.
+  - [`backend/scanners/nmap_engine.py`](backend/scanners/nmap_engine.py): Nmap + `.nse` script indexing, XML parsing, and proxy leak guard.
+  - [`backend/scanners/nuclei_engine.py`](backend/scanners/nuclei_engine.py): Nuclei integration with cross-platform auto-installer and `-proxy` routing.
+  - [`backend/scanners/zap_engine.py`](backend/scanners/zap_engine.py): OWASP ZAP integration (Daemon API / headless CLI + portable Temurin JRE 17 auto-provisioning) with SOCKS5/HTTP proxy config.
+  - [`backend/scanners/tor_engine.py`](backend/scanners/tor_engine.py): Managed Tor Expert Bundle lifecycle, RFC 1928 SOCKS5 / HTTP CONNECT tunneling, Exit IP probe, and circuit rotation.
+  - [`backend/scanners/engine_bootstrap.py`](backend/scanners/engine_bootstrap.py): Automatic startup & CLI provisioning for Nmap, Nuclei, OWASP ZAP, and Tor (`bin/`).
+  - [`backend/scanners/native_engine.py`](backend/scanners/native_engine.py): Asynchronous TCP/Banner scanner, SSL/TLS Inspector, and OWASP Web Security Analyzer (with SOCKS5h/HTTP proxy support).
+  - [`backend/scanners/nat_guard.py`](backend/scanners/nat_guard.py) & [`backend/scanners/deduplicator.py`](backend/scanners/deduplicator.py): WAN hairpin detection and cross-engine finding deduplication.
+  - [`backend/ai_engine.py`](backend/ai_engine.py), [`backend/report_engine.py`](backend/report_engine.py), [`backend/export_engine.py`](backend/export_engine.py) & [`backend/scheduler.py`](backend/scheduler.py): Multi-LLM analyst, white-label HTML/DOCX/PDF/CSV/TXT generators, and cron/interval scan scheduler.
 - **Standalone Remote Agent (`agent/`)**:
   - [`agent/urielscan_probe.py`](agent/urielscan_probe.py): Zero-dependency Python remote probe supporting Native, Nmap, and Nuclei scans over outbound HTTPS polling.
 - **Web Frontend (`frontend/`)**:
