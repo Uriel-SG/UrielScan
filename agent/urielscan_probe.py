@@ -114,12 +114,25 @@ class ProbeClient:
         except Exception as e:
             raise RuntimeError(f"Network error on {path}: {e}")
 
+    @staticmethod
+    def _detect_primary_ip(hostname: str) -> str:
+        """Resolve the active LAN/Wi-Fi egress IP via OS routing table (avoids WSL/Hyper-V virtual NICs)."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("1.1.1.1", 80))
+                ip_val = s.getsockname()[0]
+                if ip_val and not ip_val.startswith("127."):
+                    return ip_val
+        except Exception:
+            pass
+        try:
+            return socket.gethostbyname(hostname)
+        except Exception:
+            return "127.0.0.1"
+
     def heartbeat(self, engines: Dict[str, Any]) -> Dict[str, Any]:
         hostname = socket.gethostname()
-        try:
-            ip_addr = socket.gethostbyname(hostname)
-        except Exception:
-            ip_addr = "127.0.0.1"
+        ip_addr = self._detect_primary_ip(hostname)
 
         os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
         payload = {
