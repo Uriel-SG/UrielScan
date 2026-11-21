@@ -15,7 +15,8 @@ import {
   SavedReport,
   SavedAIReport,
   NatCheckResult,
-  ProbeInstallerPackage
+  ProbeInstallerPackage,
+  WordlistItem,
 } from '../types';
 
 const API_BASE = '/api';
@@ -117,6 +118,9 @@ function normalizeScan(raw: any): Scan {
     onion_mode: Boolean(cfg.onion_mode),
     proxy_url: cfg.proxy_url || undefined,
     routing: sum.routing || undefined,
+    enable_subdomain_enum: Boolean(cfg.enable_subdomain_enum),
+    enable_dir_enum: Boolean(cfg.enable_dir_enum),
+    recon: sum.recon || undefined,
     status: (raw.status || 'pending') as Scan['status'],
     progress: typeof raw.progress === 'number' ? raw.progress : 0,
     started_at: raw.started_at || new Date().toISOString(),
@@ -500,6 +504,27 @@ export const api = {
               control_port: raw.engines.tor?.control_port,
               proxy_url: raw.engines.tor?.proxy_url || undefined,
             },
+            subfinder: {
+              available: Boolean(raw.engines.subfinder?.installed ?? raw.engines.subfinder?.available ?? false),
+              installed: Boolean(raw.engines.subfinder?.installed ?? false),
+              version: raw.engines.subfinder?.version || undefined,
+            },
+            httpx: {
+              available: Boolean(raw.engines.httpx?.installed ?? raw.engines.httpx?.available ?? false),
+              installed: Boolean(raw.engines.httpx?.installed ?? false),
+              version: raw.engines.httpx?.version || undefined,
+            },
+            feroxbuster: {
+              available: Boolean(raw.engines.feroxbuster?.installed ?? raw.engines.feroxbuster?.available ?? false),
+              installed: Boolean(raw.engines.feroxbuster?.installed ?? false),
+              version: raw.engines.feroxbuster?.version || undefined,
+            },
+            subzy: {
+              available: Boolean(raw.engines.subzy?.installed ?? raw.engines.subzy?.available ?? false),
+              installed: Boolean(raw.engines.subzy?.installed ?? false),
+              version: raw.engines.subzy?.version || undefined,
+              fingerprints_count: raw.engines.subzy?.fingerprints_count ?? 0,
+            },
             native: {
               available: true,
             },
@@ -521,6 +546,10 @@ export const api = {
       nuclei: { available: false },
       zap: { available: false },
       tor: { available: false, installed: false, running: false },
+      subfinder: { available: false },
+      httpx: { available: false },
+      feroxbuster: { available: false },
+      subzy: { available: false },
       native: { available: true },
       ai: { configured: false, provider: 'None', model: '' }
     };
@@ -557,6 +586,72 @@ export const api = {
       throw new Error('Installazione OWASP ZAP fallita');
     }
     return await res.json();
+  },
+
+  async installSubfinder(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-subfinder`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) throw new Error('Installazione Subfinder fallita');
+    return await res.json();
+  },
+
+  async installHttpx(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-httpx`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) throw new Error('Installazione ProjectDiscovery httpx fallita');
+    return await res.json();
+  },
+
+  async installFeroxbuster(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-feroxbuster`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) throw new Error('Installazione Feroxbuster fallita');
+    return await res.json();
+  },
+
+  async installSubzy(): Promise<{ success: boolean; message: string; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-subzy`, {
+      method: 'POST',
+      headers: getAuthHeaders(false)
+    });
+    if (!res.ok) throw new Error('Aggiornamento Subzy Fingerprints fallito');
+    return await res.json();
+  },
+
+  async getWordlists(): Promise<{ dns: WordlistItem[]; web: WordlistItem[] }> {
+    const res = await fetch(`${API_BASE}/wordlists`, { headers: getAuthHeaders(false) });
+    if (!res.ok) return { dns: [], web: [] };
+    return await res.json();
+  },
+
+  async uploadWordlist(category: 'dns' | 'web', file: File): Promise<{ success: boolean; wordlist: WordlistItem }> {
+    const form = new FormData();
+    form.append('category', category);
+    form.append('file', file);
+    const res = await fetch(`${API_BASE}/wordlists/upload`, {
+      method: 'POST',
+      headers: getAuthHeaders(false),
+      body: form,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Upload wordlist fallito' }));
+      throw new Error(err.detail || 'Upload wordlist fallito');
+    }
+    return await res.json();
+  },
+
+  async deleteWordlist(category: 'dns' | 'web', filename: string): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/wordlists/${encodeURIComponent(category)}/${encodeURIComponent(filename)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(false),
+    });
+    return res.ok;
   },
 
   async installTor(): Promise<{ success: boolean; message: string; version?: string }> {
@@ -703,6 +798,17 @@ export const api = {
     zap_mode?: 'baseline' | 'full';
     onion_mode?: boolean;
     proxy_url?: string;
+    enable_subdomain_enum?: boolean;
+    subdomain_wordlist?: string;
+    subdomain_checks?: string[];
+    cascade_subdomains?: boolean;
+    cascade_limit?: number;
+    enable_dir_enum?: boolean;
+    dir_wordlist?: string;
+    dir_extensions?: string;
+    dir_recursion?: boolean;
+    dir_rate_limit?: number;
+    dir_time_limit?: number;
   }): Promise<Scan> {
     const res = await fetch(`${API_BASE}/scans`, {
       method: 'POST',

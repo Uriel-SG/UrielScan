@@ -198,11 +198,10 @@ def build_template() -> None:
         _exec_sql(db, "INSERT INTO `Media` (`DiskId`, `LastSequence`, `DiskPrompt`, `Cabinet`, `VolumeLabel`, `Source`) VALUES (1, 1, NULL, '#probe.cab', NULL, NULL)")
         _exec_sql(db, f"INSERT INTO `File` (`File`, `Component_`, `FileName`, `FileSize`, `Version`, `Language`, `Attributes`, `Sequence`) VALUES ('UrielScanProbeExe', 'ProbeComponent', 'URIELS~1.EXE|urielscan_probe.exe', {exe_size}, '1.0.0.0', NULL, 0, 1)")
 
-        # Custom Actions
-        _exec_sql(db, f"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('CA_SetInstallData', 51, 'CA_InstallProbe', {_sql_str('msi=[OriginalDatabase];dir=[INSTALLDIR];')})")
-        _exec_sql(db, f"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('CA_InstallProbe', 3090, 'UrielScanProbeExe', {_sql_str('--install-from-msi-data \"[CustomActionData]\"')})")
-        _exec_sql(db, f"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('CA_SetUninstallData', 51, 'CA_UninstallProbe', {_sql_str('dir=[INSTALLDIR];')})")
-        _exec_sql(db, f"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('CA_UninstallProbe', 3090, 'UrielScanProbeExe', {_sql_str('--uninstall-probe \"[CustomActionData]\"')})")
+        # Custom Actions (Type 3090 = 2 EXE + 16 installed File + 1024 Deferred + 2048 NoImpersonate SYSTEM)
+        # Note: Deferred EXE custom actions expand properties directly inside Target at schedule time (never [CustomActionData]).
+        _exec_sql(db, f"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('CA_InstallProbe', 3090, 'UrielScanProbeExe', {_sql_str('--install-from-msi-data \"msi=[OriginalDatabase];db=[DATABASE];dir=[INSTALLDIR];\"')})")
+        _exec_sql(db, f"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('CA_UninstallProbe', 3090, 'UrielScanProbeExe', {_sql_str('--uninstall-probe \"dir=[INSTALLDIR];\"')})")
 
         # InstallExecuteSequence
         exec_seq = [
@@ -214,7 +213,6 @@ def build_template() -> None:
             ("InstallInitialize", None, 1500),
             ("ProcessComponents", None, 1600),
             ("UnpublishFeatures", None, 1800),
-            ("CA_SetUninstallData", 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE', 2000),
             ("CA_UninstallProbe", 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE', 2100),
             ("RemoveFiles", None, 3500),
             ("InstallFiles", None, 4000),
@@ -222,7 +220,6 @@ def build_template() -> None:
             ("RegisterProduct", None, 6100),
             ("PublishFeatures", None, 6300),
             ("PublishProduct", None, 6400),
-            ("CA_SetInstallData", "NOT Installed", 6450),
             ("CA_InstallProbe", "NOT Installed", 6500),
             ("InstallFinalize", None, 6600),
         ]

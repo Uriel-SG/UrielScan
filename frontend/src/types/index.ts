@@ -90,6 +90,9 @@ export interface Scan {
   zap_mode?: 'baseline' | 'full';
   onion_mode?: boolean;
   proxy_url?: string;
+  enable_subdomain_enum?: boolean;
+  enable_dir_enum?: boolean;
+  recon?: ReconSummary;
   routing?: {
     mode?: string;
     onion_mode?: boolean;
@@ -146,6 +149,62 @@ export interface ScannerProfile {
   ai_base_url?: string;
 }
 
+export interface WordlistItem {
+  id: string;
+  name: string;
+  filename: string;
+  category: 'dns' | 'web';
+  source: 'seclists' | 'custom';
+  cached: boolean;
+  size_bytes?: number | null;
+  lines?: number | null;
+  description?: string;
+}
+
+export interface ReconSummary {
+  domains?: string[];
+  total_subdomains?: number;
+  subdomains?: string[];
+  sources?: Record<string, Record<string, { status: string; found: number; unique: number }>>;
+  live_subdomains?: Array<{
+    subdomain: string;
+    url: string;
+    status_code: number;
+    title?: string;
+    tech?: string[];
+    webserver?: string;
+    ip?: string;
+    cname?: string[];
+    content_length?: number;
+  }>;
+  takeovers?: Array<{
+    subdomain: string;
+    service: string;
+    cname: string;
+    status: string;
+    http_status?: number;
+    reason?: string;
+  }>;
+  dns_zones?: Array<{
+    domain: string;
+    nameservers?: string[];
+    axfr_vulnerable?: boolean;
+    axfr_nameservers?: string[];
+    axfr_records_count?: number;
+    wildcard_dns?: boolean;
+    has_spf?: boolean;
+    has_dmarc?: boolean;
+    has_caa?: boolean;
+  }>;
+  directories?: Array<{
+    url: string;
+    path: string;
+    status: number;
+    content_length?: number;
+    content_type?: string;
+  }>;
+}
+
 export interface EngineStatus {
   nmap: {
     available: boolean;
@@ -169,6 +228,27 @@ export interface EngineStatus {
     socks_port?: number;
     control_port?: number;
     proxy_url?: string;
+  };
+  subfinder?: {
+    available: boolean;
+    installed?: boolean;
+    version?: string;
+  };
+  httpx?: {
+    available: boolean;
+    installed?: boolean;
+    version?: string;
+  };
+  feroxbuster?: {
+    available: boolean;
+    installed?: boolean;
+    version?: string;
+  };
+  subzy?: {
+    available: boolean;
+    installed?: boolean;
+    version?: string;
+    fingerprints_count?: number;
   };
   native: {
     available: boolean;

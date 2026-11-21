@@ -36,7 +36,7 @@ To scan internal client networks without opening inbound firewall ports or encou
      ```bash
      python urielscan_probe.py --server https://your-urielscan-domain.com --token <AGENT_TOKEN>
      ```
-3. **Launch Remote Scans**: In **New Scan Studio**, select the client's registered probe under **Execution Probe** and launch the scan as usual. For external networks, expose UrielScan behind an **HTTPS Reverse Proxy** (Nginx, Caddy, Traefik) or a secure tunnel (Cloudflare Tunnel / WireGuard).
+3. **Launch Remote Scans**: In **New Scan Studio**, select the client's registered probe under **Execution Probe** and launch the scan as usual. For external networks, expose UrielScan behind an **HTTPS Reverse Proxy** (Nginx, Caddy, Traefik) or follow the step-by-step [Cloudflare Tunnel & Zero Trust Guide](docs/CLOUDFLARE_TUNNEL_GUIDE.md).
 
 ## Outbound Network Routing (Tor Onion & Custom Proxy)
 
@@ -44,6 +44,12 @@ In **New Scan Studio → Outbound Network Routing** (local scans), choose betwee
 - **Direct (Local IP)**: Standard egress and internal LAN/subnet scanning.
 - **Onion Routing (Tor)**: Launches the managed Tor Expert Bundle (`socks5h://127.0.0.1:19050` / ControlPort `19051`), supports `.onion` services, verifies Tor Exit IP, supports one-click **New Circuit (`SIGNAL NEWNYM`)**, and enforces fail-closed leak protection (direct Nmap is skipped or wrapped safely with `torsocks` on Unix while Native Net runs TCP/Banner probes over SOCKS5).
 - **Custom SOCKS5 / HTTP Proxy**: Route Native TCP/SSL/Web, Nuclei, and OWASP ZAP traffic through an external VPS SSH/SOCKS5 tunnel, WireGuard gateway, or HTTP proxy (`socks5h://`, `socks5://`, `http://`, `https://`) with live Exit IP verification.
+
+## Optional Web Recon Modules (Opt-In: SubRaptor + httpx + Subzy + Feroxbuster)
+
+Disabled by default and selectable per-scan in **New Scan Studio**:
+- **Subdomain Discovery & Intelligence**: Combines **SubRaptor**-style passive aggregation (**Subfinder**, **Assetfinder**, **crt.sh** with per-source Found/Unique attribution), optional DNS bruteforce via SecLists (`n0kovo_subdomains.txt`, `subdomains-top1million-110000.txt`, `italian-subdomains.txt`) or custom `.txt` upload, **DNS Zone Audit** (AXFR transfer test, Wildcard check, SPF/DMARC/CAA), live web/tech probing (**ProjectDiscovery `httpx`**), and **Subdomain Takeover** checks (**Subzy** / `can-i-take-over-xyz` 76-signature DB), with optional cascade into Web/Nuclei/ZAP/Feroxbuster.
+- **Directory Enumeration (`Feroxbuster`)**: High-speed wildcard-filtered content discovery with SecLists (`DirBuster-2007_directory-list-2.3-medium.txt` / `big.txt`) or custom `.txt` upload, rate/time limits, and proxy/Tor support.
 
 ## NAT Loopback Guard & Cross-Engine Deduplication
 

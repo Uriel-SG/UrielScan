@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Body, Response, Header, Request
+from fastapi import FastAPI, HTTPException, Query, Body, Response, Header, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -41,6 +41,17 @@ from backend.auth import (
 from backend.scanners.nmap_engine import detect_nmap, get_nse_catalog, install_nmap
 from backend.scanners.nuclei_engine import detect_nuclei, install_nuclei
 from backend.scanners.zap_engine import detect_zap, install_zap
+from backend.scanners.recon_engine import (
+    detect_subfinder,
+    install_subfinder,
+    detect_httpx,
+    install_httpx,
+    detect_feroxbuster,
+    install_feroxbuster,
+    detect_subzy,
+    install_subzy,
+)
+from backend.scanners.wordlists import list_wordlists, save_custom_wordlist, delete_custom_wordlist
 from backend.scanners.tor_engine import (
     detect_tor,
     install_tor,
@@ -230,6 +241,17 @@ class ScanCreateModel(BaseModel):
     agent_id: Optional[int | str] = None
     onion_mode: Optional[bool] = False
     proxy_url: Optional[str] = None
+    enable_subdomain_enum: Optional[bool] = False
+    subdomain_wordlist: Optional[str] = "n0kovo"
+    subdomain_checks: Optional[List[str]] = None
+    cascade_subdomains: Optional[bool] = True
+    cascade_limit: Optional[int] = 20
+    enable_dir_enum: Optional[bool] = False
+    dir_wordlist: Optional[str] = "dirbuster_medium"
+    dir_extensions: Optional[str] = ""
+    dir_recursion: Optional[bool] = False
+    dir_rate_limit: Optional[int] = 100
+    dir_time_limit: Optional[int] = 180
 
 
 class ProxyTestRequest(BaseModel):
@@ -350,6 +372,10 @@ async def get_system_status():
     nuclei_info = detect_nuclei()
     zap_info = detect_zap()
     tor_info = detect_tor()
+    subfinder_info = detect_subfinder()
+    httpx_info = detect_httpx()
+    feroxbuster_info = detect_feroxbuster()
+    subzy_info = detect_subzy()
 
     return {
         "status": "healthy",
@@ -369,6 +395,10 @@ async def get_system_status():
             "nuclei": nuclei_info,
             "zap": zap_info,
             "tor": tor_info,
+            "subfinder": subfinder_info,
+            "httpx": httpx_info,
+            "feroxbuster": feroxbuster_info,
+            "subzy": subzy_info,
         },
         "bootstrap": get_bootstrap_state(),
     }
@@ -387,6 +417,55 @@ async def install_nuclei_endpoint():
 @app.post("/api/system/install-zap")
 async def install_zap_endpoint():
     return await install_zap()
+
+
+@app.post("/api/system/install-subfinder")
+async def install_subfinder_endpoint():
+    return await install_subfinder()
+
+
+@app.post("/api/system/install-httpx")
+async def install_httpx_endpoint():
+    return await install_httpx()
+
+
+@app.post("/api/system/install-feroxbuster")
+async def install_feroxbuster_endpoint():
+    return await install_feroxbuster()
+
+
+@app.post("/api/system/install-subzy")
+async def install_subzy_endpoint():
+    return await install_subzy()
+
+
+@app.get("/api/wordlists")
+async def get_wordlists_endpoint():
+    return list_wordlists()
+
+
+@app.post("/api/wordlists/upload")
+async def upload_wordlist_endpoint(
+    category: str = Form(...),
+    file: UploadFile = File(...),
+):
+    content = await file.read()
+    try:
+        saved = save_custom_wordlist(category, file.filename or "custom.txt", content)
+        return {"success": True, "wordlist": saved}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/wordlists/{category}/{filename}")
+async def delete_wordlist_endpoint(category: str, filename: str):
+    try:
+        removed = delete_custom_wordlist(category, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not removed:
+        raise HTTPException(status_code=404, detail="Wordlist not found.")
+    return {"success": True}
 
 
 @app.post("/api/system/install-tor")
@@ -869,6 +948,30 @@ async def create_and_start_scan(payload: ScanCreateModel):
     elif "proxy_url" in cfg:
         cfg.pop("proxy_url", None)
 
+    if payload.enable_subdomain_enum is not None:
+        cfg["enable_subdomain_enum"] = bool(payload.enable_subdomain_enum)
+    if payload.subdomain_wordlist is not None:
+        cfg["subdomain_wordlist"] = payload.subdomain_wordlist
+    if payload.subdomain_checks is not None:
+        cfg["subdomain_checks"] = payload.subdomain_checks
+    if payload.cascade_subdomains is not None:
+        cfg["cascade_subdomains"] = bool(payload.cascade_subdomains)
+    if payload.cascade_limit is not None:
+        cfg["cascade_limit"] = max(1, min(int(payload.cascade_limit), 50))
+
+    if payload.enable_dir_enum is not None:
+        cfg["enable_dir_enum"] = bool(payload.enable_dir_enum)
+    if payload.dir_wordlist is not None:
+        cfg["dir_wordlist"] = payload.dir_wordlist
+    if payload.dir_extensions is not None:
+        cfg["dir_extensions"] = payload.dir_extensions
+    if payload.dir_recursion is not None:
+        cfg["dir_recursion"] = bool(payload.dir_recursion)
+    if payload.dir_rate_limit is not None:
+        cfg["dir_rate_limit"] = max(10, min(int(payload.dir_rate_limit), 500))
+    if payload.dir_time_limit is not None:
+        cfg["dir_time_limit"] = max(30, min(int(payload.dir_time_limit), 600))
+
     profile = payload.scan_type or payload.scan_profile or "standard"
 
     from datetime import datetime, timezone
@@ -1033,6 +1136,7 @@ async def export_scan_results(
         filename = f"urielscan_{safe_slug}.txt"
     else:
         export_class = "ESPORTAZIONE RISULTATI SCANSIONE" if is_it else "SCAN RESULTS EXPORT"
+        single_recon = (scans_meta[0].get("summary") or {}).get("recon") if len(scans_meta) == 1 else None
         data = generate_pdf_document(
             report_title=title,
             classification=export_class,
@@ -1048,6 +1152,7 @@ async def export_scan_results(
             include_host_topology=True,
             org_map=org_map if len(scans_meta) > 1 else None,
             lang=lang,
+            recon_summary=single_recon,
         )
         media_type = "application/pdf"
         filename = f"urielscan_{safe_slug}.pdf"
@@ -1324,6 +1429,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
 
     fmt = req.format.lower()
     saved_report_id = ""
+    scan_recon_summary = (scan.get("summary") or {}).get("recon")
     if fmt == "pdf":
         data = generate_pdf_document(
             report_title=title,
@@ -1339,6 +1445,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             include_evidence=req.include_evidence,
             include_host_topology=req.include_host_topology,
             lang=lang,
+            recon_summary=scan_recon_summary,
         )
         media_type = "application/pdf"
         filename = f"urielscan_report_scan_{sid}.pdf"
@@ -1357,6 +1464,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             include_evidence=req.include_evidence,
             include_host_topology=req.include_host_topology,
             lang=lang,
+            recon_summary=scan_recon_summary,
         )
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         filename = f"urielscan_report_scan_{sid}.docx"

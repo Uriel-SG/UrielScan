@@ -7,7 +7,8 @@ from backend.database import get_db_connection, get_scan_by_id, get_settings, ge
 from backend.scanners.native_engine import run_native_net_scan, run_native_ssl_scan, run_native_web_scan
 from backend.scanners.nmap_engine import detect_nmap, run_nmap_scan
 from backend.scanners.nuclei_engine import detect_nuclei, run_nuclei_scan
-from backend.scanners.zap_engine import detect_zap, run_zap_scan
+from backend.scanners.zap_engine import detect_zap, run_zap_scan, _format_web_urls
+from backend.scanners.recon_engine import run_subraptor_pipeline, run_feroxbuster_scan
 from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.nat_guard import (
     check_targets_nat_loopback,
@@ -188,6 +189,56 @@ async def run_scan_pipeline(scan_id: int) -> None:
         if STOP_FLAGS.get(scan_id, False):
             return
 
+        recon_summary: Dict[str, Any] = {}
+        cascaded_web_urls: List[str] = []
+        cascaded_hosts: List[str] = []
+        if bool(config.get("enable_subdomain_enum")):
+            update_progress(12, "SubRaptor Discovery, DNS Zone & Subdomain Takeover...")
+            recon_data, sub_findings = await run_subraptor_pipeline(
+                targets=targets,
+                wordlist_id=config.get("subdomain_wordlist", "passive_only"),
+                checks=config.get("subdomain_checks"),
+                proxy_url=active_proxy_url,
+                onion_mode=onion_mode,
+                log_callback=append_log,
+            )
+            all_findings.extend(sub_findings)
+            recon_summary.update(recon_data)
+
+            for lr in recon_data.get("live_subdomains", []):
+                sub_host = lr.get("subdomain")
+                if sub_host and sub_host not in all_hosts:
+                    sub_url = lr.get("url", "")
+                    sub_port = 443 if sub_url.startswith("https://") else 80
+                    all_hosts[sub_host] = {
+                        "ip": lr.get("ip") or sub_host,
+                        "hostname": sub_host,
+                        "os": f"HTTP/{lr.get('status_code', 200)} {(lr.get('webserver') or '').strip()}".strip(),
+                        "ports": [{
+                            "port": sub_port,
+                            "protocol": "tcp",
+                            "state": "open",
+                            "service": "https" if sub_port == 443 else "http",
+                            "version": lr.get("webserver", ""),
+                        }],
+                    }
+                if lr.get("url"):
+                    cascaded_web_urls.append(lr["url"])
+                if sub_host:
+                    cascaded_hosts.append(sub_host)
+
+            if bool(config.get("cascade_subdomains", True)) and cascaded_web_urls:
+                lim = max(1, min(int(config.get("cascade_limit", 20) or 20), 50))
+                cascaded_web_urls = list(dict.fromkeys(cascaded_web_urls))[:lim]
+                cascaded_hosts = list(dict.fromkeys(cascaded_hosts))[:lim]
+                append_log(
+                    "INFO",
+                    f"[Orchestrator] Passaggio di {len(cascaded_web_urls)} sottodomini HTTP/S vivi ai motori Web.",
+                )
+            else:
+                cascaded_web_urls = []
+                cascaded_hosts = []
+
         # -------------------------------------------------------------
         # 1. Nmap Execution (if requested and installed)
         # -------------------------------------------------------------
@@ -304,13 +355,23 @@ async def run_scan_pipeline(scan_id: int) -> None:
             # on domain/URL scans, always preserve original targets for SNI & VirtualHost headers
             has_cidr = any("/" in t and t.split("/", 1)[1].isdigit() for t in targets.replace(",", " ").split())
             if not has_cidr:
-                web_targets_str = targets
+                base_web = targets
             elif len(all_hosts) > 1 and web_capable_hosts:
-                web_targets_str = ", ".join(web_capable_hosts)
+                base_web = ", ".join(web_capable_hosts)
             elif len(all_hosts) <= 1:
-                web_targets_str = targets
+                base_web = targets
             else:
-                web_targets_str = ""
+                base_web = ""
+
+            if cascaded_hosts:
+                existing_toks = [x.strip() for x in base_web.split(",") if x.strip()]
+                for ch in cascaded_hosts:
+                    if ch not in existing_toks:
+                        existing_toks.append(ch)
+                web_targets_str = ", ".join(existing_toks)
+            else:
+                web_targets_str = base_web
+
             if web_targets_str:
                 update_progress(58, "Audit Crittografia SSL/TLS in corso...")
                 ssl_findings = await run_native_ssl_scan(
@@ -334,26 +395,31 @@ async def run_scan_pipeline(scan_id: int) -> None:
             return
 
         # -------------------------------------------------------------
-        # 4. Nuclei & 4b. OWASP ZAP Web Execution
+        # 4. Nuclei, 4b. OWASP ZAP & 4c. Feroxbuster Directory Enum
         # -------------------------------------------------------------
         def _resolve_web_target_urls() -> str:
+            base_urls: List[str] = []
             has_cidr = any("/" in t and t.split("/", 1)[1].isdigit() for t in targets.replace(",", " ").split())
             if not has_cidr:
-                return targets
-            if web_capable_hosts:
-                web_urls: List[str] = []
+                base_urls.extend(_format_web_urls(targets) or [t.strip() for t in targets.split(",") if t.strip()])
+            elif web_capable_hosts:
                 for ip in web_capable_hosts:
                     h_obj = all_hosts.get(ip, {})
                     for p in h_obj.get("ports", []):
                         port_num = p.get("port")
                         if port_num in {80, 8000, 8008, 8080, 8888, 3000, 5000, 9000}:
-                            web_urls.append(f"http://{ip}" if port_num == 80 else f"http://{ip}:{port_num}")
+                            base_urls.append(f"http://{ip}" if port_num == 80 else f"http://{ip}:{port_num}")
                         elif port_num in {443, 8443}:
-                            web_urls.append(f"https://{ip}" if port_num == 443 else f"https://{ip}:{port_num}")
-                return ", ".join(dict.fromkeys(web_urls))
-            return ""
+                            base_urls.append(f"https://{ip}" if port_num == 443 else f"https://{ip}:{port_num}")
+            if cascaded_web_urls:
+                base_urls.extend(cascaded_web_urls)
+            return ", ".join(dict.fromkeys(u for u in base_urls if u))
 
-        web_scan_targets_str = _resolve_web_target_urls() if ("nuclei" in engines or "zap" in engines) else ""
+        web_scan_targets_str = (
+            _resolve_web_target_urls()
+            if ("nuclei" in engines or "zap" in engines or bool(config.get("enable_dir_enum")))
+            else ""
+        )
 
         if "nuclei" in engines:
             nuclei_det = detect_nuclei()
@@ -382,7 +448,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
             if zap_det["installed"]:
                 if web_scan_targets_str:
                     zap_mode = config.get("zap_mode", "baseline")
-                    update_progress(83, "Esecuzione OWASP ZAP Web Application Scan...")
+                    update_progress(82, "Esecuzione OWASP ZAP Web Application Scan...")
                     append_log("INFO", f"Esecuzione {zap_det['version']} ({zap_mode}) su: {web_scan_targets_str}")
                     zap_findings = await run_zap_scan(
                         targets=web_scan_targets_str,
@@ -395,6 +461,30 @@ async def run_scan_pipeline(scan_id: int) -> None:
                     append_log("INFO", "Nessun servizio Web attivo rilevato sulla subnet CIDR: scansione OWASP ZAP saltata.")
             else:
                 append_log("WARN", "OWASP ZAP non rilevato (daemon API/CLI assente): modulo ZAP saltato.")
+
+        if STOP_FLAGS.get(scan_id, False):
+            return
+
+        if bool(config.get("enable_dir_enum")):
+            ferox_urls = list(dict.fromkeys(_format_web_urls(targets) + cascaded_web_urls))
+            if not ferox_urls and web_capable_hosts:
+                ferox_urls = [f"http://{ip}" for ip in web_capable_hosts[:4]]
+            if ferox_urls:
+                update_progress(86, "Enumerazione directory Web con Feroxbuster...")
+                dirs_found, dir_findings = await run_feroxbuster_scan(
+                    urls=ferox_urls,
+                    wordlist_id=config.get("dir_wordlist", "dirbuster_medium"),
+                    extensions=config.get("dir_extensions"),
+                    recursion=bool(config.get("dir_recursion", False)),
+                    rate_limit=int(config.get("dir_rate_limit", 100) or 100),
+                    time_limit=int(config.get("dir_time_limit", 180) or 180),
+                    proxy_url=active_proxy_url,
+                    log_callback=append_log,
+                )
+                all_findings.extend(dir_findings)
+                recon_summary["directories"] = dirs_found
+            else:
+                append_log("WARN", "[Feroxbuster] Nessun URL Web valido rilevato per l'enumerazione delle directory.")
 
         if STOP_FLAGS.get(scan_id, False):
             return
@@ -478,6 +568,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
             "nat_loopback_detected": bool(nat_stats),
             "nat_guard": nat_stats,
             "routing": routing_meta,
+            **({"recon": recon_summary} if recon_summary else {}),
         }
 
         with conn:

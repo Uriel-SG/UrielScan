@@ -62,7 +62,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
 }) => {
   const { lang, locale, L } = useI18n();
   const { showToast } = useToast();
-  const [activeTab, setActiveTab] = useState<'findings' | 'hosts' | 'logs'>(initialTab || 'findings');
+  const [activeTab, setActiveTab] = useState<'findings' | 'hosts' | 'recon' | 'logs'>((initialTab as any) || 'findings');
   const [findings, setFindings] = useState<Finding[]>([]);
   const [hosts, setHosts] = useState<(HostInfo & { org_id?: string; scan_name?: string })[]>([]);
   const [isLoadingDetails, setIsLoadingDetails] = useState<boolean>(false);
@@ -846,6 +846,16 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
         >
           {L('Hosts & Ports', 'Host & Porte')} ({hosts.length})
         </button>
+        {currentScan?.recon && (
+          <button
+            onClick={() => setActiveTab('recon')}
+            className={`px-3 py-1.5 rounded text-xs font-semibold border transition ${
+              activeTab === 'recon' ? 'border-theme-accent bg-subtle text-theme-primary' : 'border-transparent text-theme-muted hover:text-theme-primary'
+            }`}
+          >
+            {L('Recon / Surface', 'Recon / Superficie')} ({currentScan.recon.total_subdomains ?? 0} / {currentScan.recon.directories?.length ?? 0})
+          </button>
+        )}
         <button
           onClick={() => setActiveTab('logs')}
           className={`px-3 py-1.5 rounded text-xs font-semibold border transition ${
@@ -911,6 +921,11 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                 <option value="nmap" className="bg-panel text-theme-primary">Nmap NSE</option>
                 <option value="nuclei" className="bg-panel text-theme-primary">Nuclei</option>
                 <option value="zap" className="bg-panel text-theme-primary">OWASP ZAP</option>
+                <option value="subraptor" className="bg-panel text-theme-primary">SubRaptor</option>
+                <option value="httpx" className="bg-panel text-theme-primary">PD httpx</option>
+                <option value="subzy" className="bg-panel text-theme-primary">Subzy Takeover</option>
+                <option value="dns_zone" className="bg-panel text-theme-primary">DNS Zone AXFR</option>
+                <option value="feroxbuster" className="bg-panel text-theme-primary">Feroxbuster</option>
                 <option value="native_web" className="bg-panel text-theme-primary">Native Web</option>
                 <option value="native_net" className="bg-panel text-theme-primary">Native Net</option>
               </select>
@@ -1114,6 +1129,158 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* TAB 3: RECON / SURFACE */}
+      {activeTab === 'recon' && currentScan?.recon && (
+        <div className="space-y-4">
+          {/* Recon KPI Strip */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Total Subdomains', 'Sottodomini Totali')}</div>
+              <div className="text-lg font-bold text-theme-primary font-mono">{currentScan.recon.total_subdomains ?? 0}</div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Live HTTP/S', 'HTTP/S Attivi')}</div>
+              <div className="text-lg font-bold text-emerald-400 font-mono">{currentScan.recon.live_subdomains?.length ?? 0}</div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Takeovers (Subzy)', 'Takeover (Subzy)')}</div>
+              <div className={`text-lg font-bold font-mono ${(currentScan.recon.takeovers?.length ?? 0) > 0 ? 'text-red-400' : 'text-theme-primary'}`}>
+                {currentScan.recon.takeovers?.length ?? 0}
+              </div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('DNS AXFR Open', 'DNS AXFR Aperti')}</div>
+              <div className={`text-lg font-bold font-mono ${(currentScan.recon.dns_zones?.filter((z) => z.axfr_vulnerable).length ?? 0) > 0 ? 'text-red-400' : 'text-theme-primary'}`}>
+                {currentScan.recon.dns_zones?.filter((z) => z.axfr_vulnerable).length ?? 0}
+              </div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Directories (Ferox)', 'Directory (Ferox)')}</div>
+              <div className="text-lg font-bold text-sky-400 font-mono">{currentScan.recon.directories?.length ?? 0}</div>
+            </div>
+          </div>
+
+          {/* SubRaptor Sources Attribution & DNS Zone Audit */}
+          {(Object.keys(currentScan.recon.sources || {}).length > 0 || (currentScan.recon.dns_zones?.length ?? 0) > 0) && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {Object.keys(currentScan.recon.sources || {}).length > 0 && (
+                <div className="card-industrial p-4 space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                    {L('SubRaptor Per-Source Breakdown', 'Dettaglio Fonti SubRaptor')}
+                  </div>
+                  {Object.entries(currentScan.recon.sources || {}).map(([dom, srcMap]) => (
+                    <div key={dom} className="space-y-1.5 pt-1">
+                      <div className="text-xs font-mono font-bold text-theme-accent">{dom}</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(srcMap).map(([srcName, st]) => (
+                          <span key={srcName} className="px-2 py-0.5 rounded border border-theme bg-subtle text-[11px] font-mono text-theme-secondary">
+                            <span className="font-bold text-theme-primary">{srcName}</span>: {st.found} ({L('uniq', 'unici')} {st.unique}) [{st.status}]
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {(currentScan.recon.dns_zones?.length ?? 0) > 0 && (
+                <div className="card-industrial p-4 space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                    {L('DNS Zone & Hygiene Audit', 'Audit Zona DNS & Igiene')}
+                  </div>
+                  <div className="space-y-2">
+                    {(currentScan.recon.dns_zones || []).map((z) => (
+                      <div key={z.domain} className="p-2 rounded border border-theme bg-subtle text-xs space-y-1">
+                        <div className="flex items-center justify-between font-mono font-bold">
+                          <span className="text-theme-primary">{z.domain}</span>
+                          <span className={z.axfr_vulnerable ? 'text-red-400' : 'text-emerald-400'}>
+                            AXFR: {z.axfr_vulnerable ? `OPEN (${z.axfr_records_count})` : 'Closed'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-theme-muted flex flex-wrap gap-3">
+                          <span>Wildcard: {z.wildcard_dns ? 'Yes' : 'No'}</span>
+                          <span>SPF: {z.has_spf ? 'OK' : 'Missing'}</span>
+                          <span>DMARC: {z.has_dmarc ? 'OK' : 'Missing'}</span>
+                          <span>CAA: {z.has_caa ? 'OK' : 'Missing'}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Live Subdomains (httpx) */}
+          {(currentScan.recon.live_subdomains?.length ?? 0) > 0 && (
+            <div className="card-industrial p-4 space-y-2">
+              <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                {L('Live HTTP/S Subdomains & Tech Stack (httpx)', 'Sottodomini HTTP/S Attivi & Tech Stack (httpx)')}
+              </div>
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-theme text-[11px] font-mono text-theme-muted">
+                    <tr>
+                      <th className="py-1.5 pr-3">URL</th>
+                      <th className="py-1.5 pr-3">Status</th>
+                      <th className="py-1.5 pr-3">Title</th>
+                      <th className="py-1.5 pr-3">Tech Stack</th>
+                      <th className="py-1.5">CNAME / IP</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-theme-subtle">
+                    {(currentScan.recon.live_subdomains || []).map((lr, i) => (
+                      <tr key={i} className="hover:bg-subtle">
+                        <td className="py-1.5 pr-3 font-mono text-theme-accent break-all">{lr.url || lr.subdomain}</td>
+                        <td className="py-1.5 pr-3 font-mono font-bold text-theme-primary">{lr.status_code}</td>
+                        <td className="py-1.5 pr-3 text-theme-secondary max-w-xs truncate">{lr.title || '-'}</td>
+                        <td className="py-1.5 pr-3 font-mono text-[11px] text-theme-secondary">
+                          {(lr.tech || []).join(', ') || lr.webserver || '-'}
+                        </td>
+                        <td className="py-1.5 font-mono text-[11px] text-theme-muted">
+                          {(lr.cname && lr.cname.length > 0 ? lr.cname.join(', ') : lr.ip) || '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Feroxbuster Discovered Paths */}
+          {(currentScan.recon.directories?.length ?? 0) > 0 && (
+            <div className="card-industrial p-4 space-y-2">
+              <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                {L('Discovered Web Paths & Directories (Feroxbuster)', 'Percorsi & Directory Scoperte (Feroxbuster)')}
+              </div>
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-theme text-[11px] font-mono text-theme-muted">
+                    <tr>
+                      <th className="py-1.5 pr-3">Status</th>
+                      <th className="py-1.5 pr-3">URL / Path</th>
+                      <th className="py-1.5 pr-3">Size</th>
+                      <th className="py-1.5">Content-Type</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-theme-subtle">
+                    {(currentScan.recon.directories || []).map((d, i) => (
+                      <tr key={i} className="hover:bg-subtle">
+                        <td className="py-1.5 pr-3 font-mono font-bold text-theme-primary">{d.status}</td>
+                        <td className="py-1.5 pr-3 font-mono text-theme-accent break-all">{d.url || d.path}</td>
+                        <td className="py-1.5 pr-3 font-mono text-theme-secondary">{d.content_length ?? 0} B</td>
+                        <td className="py-1.5 font-mono text-[11px] text-theme-muted">{d.content_type || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

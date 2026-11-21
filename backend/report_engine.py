@@ -38,6 +38,122 @@ def _safe_img_data_url(url: Any) -> str:
     return ""
 
 
+def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
+    """Build bilingual HTML section for SubRaptor/httpx/Subzy/DNS Zone/Feroxbuster recon summary."""
+    if not isinstance(recon, dict) or not (
+        recon.get("total_subdomains")
+        or recon.get("dns_zones")
+        or recon.get("takeovers")
+        or recon.get("directories")
+    ):
+        return ""
+
+    sec_title = (
+        "Superficie d'Attacco & Web Recon (SubRaptor / httpx / Subzy / Feroxbuster)"
+        if is_it
+        else "Attack Surface & Web Recon Intelligence (SubRaptor / httpx / Subzy / Feroxbuster)"
+    )
+    live_subs = recon.get("live_subdomains") or []
+    takeovers = recon.get("takeovers") or []
+    dns_zones = recon.get("dns_zones") or []
+    dirs = recon.get("directories") or []
+    axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
+    sources = recon.get("sources") or {}
+
+    src_badges = ""
+    for dom, sdict in sources.items():
+        if not isinstance(sdict, dict):
+            continue
+        pills = " ".join(
+            f"<span class='badge' style='background:#f1f5f9;color:#1e293b;'>{_esc(src)}: {_esc(info.get('found', 0))} (uniq {_esc(info.get('unique', 0))})</span>"
+            for src, info in sdict.items()
+            if isinstance(info, dict)
+        )
+        src_badges += f"<div style='margin:6px 0;font-size:12px;'><strong>{_esc(dom)}:</strong> {pills}</div>"
+
+    sub_rows = ""
+    for lr in live_subs[:35]:
+        tech_str = ", ".join((lr.get("tech") or [])[:4]) or "-"
+        cnames_str = ", ".join(lr.get("cname") or []) or "-"
+        sub_rows += (
+            f"<tr>"
+            f"<td><code>{_esc(lr.get('url') or lr.get('subdomain'))}</code></td>"
+            f"<td><strong>{_esc(lr.get('status_code') or '-')}</strong></td>"
+            f"<td>{_esc(lr.get('title') or '-')}</td>"
+            f"<td>{_esc(tech_str)}</td>"
+            f"<td><code>{_esc(cnames_str)}</code></td>"
+            f"</tr>"
+        )
+    sub_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("Sottodomini HTTP/S Attivi (httpx)" if is_it else "Live HTTP/S Subdomains (httpx)")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>URL / Subdomain</th><th>Status</th><th>Title</th><th>Tech</th><th>CNAME</th>"
+        + f"</tr></thead><tbody>{sub_rows}</tbody></table>"
+        if sub_rows
+        else ""
+    )
+
+    dns_rows = ""
+    for z in dns_zones:
+        axfr_lbl = "<span style='color:#dc2626;font-weight:bold;'>OPEN</span>" if z.get("axfr_vulnerable") else "Closed"
+        dns_rows += (
+            f"<tr>"
+            f"<td><strong>{_esc(z.get('domain'))}</strong></td>"
+            f"<td>{', '.join(_esc(n) for n in (z.get('nameservers') or [])[:3]) or '-'}</td>"
+            f"<td>{axfr_lbl}</td>"
+            f"<td>{'Yes' if z.get('wildcard_dns') else 'No'}</td>"
+            f"<td>{'OK' if z.get('has_spf') else 'Missing'} / {'OK' if z.get('has_dmarc') else 'Missing'}</td>"
+            f"</tr>"
+        )
+    dns_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("Audit Zona DNS & AXFR" if is_it else "DNS Zone & AXFR Audit")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>Domain</th><th>Nameservers</th><th>AXFR</th><th>Wildcard</th><th>SPF / DMARC</th>"
+        + f"</tr></thead><tbody>{dns_rows}</tbody></table>"
+        if dns_rows
+        else ""
+    )
+
+    dir_rows = ""
+    for d in dirs[:35]:
+        dir_rows += (
+            f"<tr>"
+            f"<td><strong>{_esc(d.get('status') or '-')}</strong></td>"
+            f"<td><code>{_esc(d.get('url') or d.get('path'))}</code></td>"
+            f"<td>{_esc(d.get('content_length', 0))} B</td>"
+            f"<td>{_esc(d.get('content_type') or '-')}</td>"
+            f"</tr>"
+        )
+    dir_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("Percorsi Web Enumerati (Feroxbuster)" if is_it else "Discovered Web Paths (Feroxbuster)")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>Status</th><th>URL / Path</th><th>Size</th><th>Content-Type</th>"
+        + f"</tr></thead><tbody>{dir_rows}</tbody></table>"
+        if dir_rows
+        else ""
+    )
+
+    return f"""
+        <h2 class="section-title page-break-before">{_esc(sec_title)}</h2>
+        <div class="exec-card" style="margin-bottom:16px;">
+            <div style="font-size:13px;display:flex;gap:18px;flex-wrap:wrap;margin-bottom:6px;">
+                <span><strong>Subdomains:</strong> {int(recon.get('total_subdomains') or 0)}</span>
+                <span><strong>Live HTTP/S:</strong> {len(live_subs)}</span>
+                <span><strong>Takeovers (Subzy):</strong> {len(takeovers)}</span>
+                <span><strong>AXFR Open:</strong> {axfr_open}</span>
+                <span><strong>Directories (Feroxbuster):</strong> {len(dirs)}</span>
+            </div>
+            {src_badges}
+        </div>
+        {dns_table}
+        {sub_table}
+        {dir_table}
+    """
+
+
 def generate_html_report(
     scan_id: int,
     classification: str = "CONFIDENTIAL - PURPLE TEAM ASSESSMENT",
@@ -726,6 +842,8 @@ def generate_html_report(
                 {hosts_table_html or hosts_empty}
             </tbody>
         </table>
+
+        {_build_recon_html_section(summary.get("recon") or {}, is_it)}
 
         <!-- Detailed Technical Dossiers -->
         <h2 class="section-title page-break-before">{sec4_title}</h2>

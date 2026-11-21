@@ -15,8 +15,10 @@ import {
   AlertTriangle,
   ShieldCheck,
   RefreshCw,
+  Upload,
+  Trash2,
 } from 'lucide-react';
-import { Organization, NSEScript, Scan, RemoteAgent, NatCheckResult } from '../types';
+import { Organization, NSEScript, Scan, RemoteAgent, NatCheckResult, WordlistItem } from '../types';
 import { api } from '../services/api';
 import { useToast } from './UIFeedback';
 import { useI18n } from '../i18n/LanguageContext';
@@ -136,6 +138,65 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [customProxyUrl, setCustomProxyUrl] = useState<string>('');
   const [isTestingRouting, setIsTestingRouting] = useState<boolean>(false);
   const [routingStatus, setRoutingStatus] = useState<{ ok: boolean; ip?: string; is_tor?: boolean; message?: string } | null>(null);
+
+  // Strictly opt-in Web Recon & Discovery Modules (both OFF by default)
+  const [enableSubdomainEnum, setEnableSubdomainEnum] = useState<boolean>(false);
+  const [subdomainWordlist, setSubdomainWordlist] = useState<string>('n0kovo');
+  const [subdomainChecks, setSubdomainChecks] = useState<string[]>(['httpx', 'takeover', 'dns_zone']);
+  const [cascadeSubdomains, setCascadeSubdomains] = useState<boolean>(true);
+  const [cascadeLimit, setCascadeLimit] = useState<number>(20);
+
+  const [enableDirEnum, setEnableDirEnum] = useState<boolean>(false);
+  const [dirWordlist, setDirWordlist] = useState<string>('dirbuster_medium');
+  const [dirExtensions, setDirExtensions] = useState<string>('');
+  const [dirRecursion, setDirRecursion] = useState<boolean>(false);
+  const [dirRateLimit, setDirRateLimit] = useState<number>(100);
+  const [dirTimeLimit, setDirTimeLimit] = useState<number>(180);
+
+  const [wordlistsData, setWordlistsData] = useState<{ dns: WordlistItem[]; web: WordlistItem[] }>({ dns: [], web: [] });
+  const [uploadingCategory, setUploadingCategory] = useState<'dns' | 'web' | null>(null);
+
+  useEffect(() => {
+    api.getWordlists().then((data) => {
+      setWordlistsData(data);
+    }).catch(() => {});
+  }, []);
+
+  const handleUploadCustomWordlist = async (category: 'dns' | 'web', file: File | null) => {
+    if (!file) return;
+    setUploadingCategory(category);
+    try {
+      const res = await api.uploadWordlist(category, file);
+      const updated = await api.getWordlists();
+      setWordlistsData(updated);
+      if (category === 'dns') setSubdomainWordlist(res.wordlist.id);
+      else setDirWordlist(res.wordlist.id);
+      showToast(L(`Custom wordlist uploaded: ${res.wordlist.filename}`, `Wordlist caricata: ${res.wordlist.filename}`), 'success');
+    } catch (err: any) {
+      showToast(err?.message || L('Wordlist upload failed.', 'Caricamento wordlist fallito.'), 'error');
+    } finally {
+      setUploadingCategory(null);
+    }
+  };
+
+  const handleDeleteCustomWordlist = async (category: 'dns' | 'web', filename: string) => {
+    try {
+      const ok = await api.deleteWordlist(category, filename);
+      if (ok) {
+        const updated = await api.getWordlists();
+        setWordlistsData(updated);
+        if (category === 'dns' && subdomainWordlist === `custom:${filename}`) setSubdomainWordlist('n0kovo');
+        if (category === 'web' && dirWordlist === `custom:${filename}`) setDirWordlist('dirbuster_medium');
+        showToast(L('Custom wordlist deleted.', 'Wordlist personalizzata rimossa.'), 'info');
+      }
+    } catch (err: any) {
+      showToast(err?.message || L('Delete failed.', 'Eliminazione fallita.'), 'error');
+    }
+  };
+
+  const toggleSubdomainCheck = (chk: string) => {
+    setSubdomainChecks((prev) => (prev.includes(chk) ? prev.filter((c) => c !== chk) : [...prev, chk]));
+  };
 
   useEffect(() => {
     const trimmed = targets.trim();
@@ -507,6 +568,17 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       engines: activeEnginesList,
       onion_mode: effectiveOnion,
       proxy_url: effectiveProxy,
+      enable_subdomain_enum: enableSubdomainEnum,
+      subdomain_wordlist: enableSubdomainEnum ? subdomainWordlist : undefined,
+      subdomain_checks: enableSubdomainEnum ? subdomainChecks : undefined,
+      cascade_subdomains: enableSubdomainEnum ? cascadeSubdomains : undefined,
+      cascade_limit: enableSubdomainEnum ? cascadeLimit : undefined,
+      enable_dir_enum: enableDirEnum,
+      dir_wordlist: enableDirEnum ? dirWordlist : undefined,
+      dir_extensions: enableDirEnum ? dirExtensions.trim() : undefined,
+      dir_recursion: enableDirEnum ? dirRecursion : undefined,
+      dir_rate_limit: enableDirEnum ? dirRateLimit : undefined,
+      dir_time_limit: enableDirEnum ? dirTimeLimit : undefined,
       config: {
         ports: portSelection === 'custom' ? customPorts : portSelection,
         nmap_flags: activeFlagsString,
@@ -517,6 +589,8 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
         zap_mode: zapMode,
         onion_mode: effectiveOnion,
         ...(effectiveProxy ? { proxy_url: effectiveProxy } : {}),
+        enable_subdomain_enum: enableSubdomainEnum,
+        enable_dir_enum: enableDirEnum,
       },
       nmap_args: liveNmapCommand,
       nse_scripts: selectedNseScripts,
@@ -1247,6 +1321,301 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
           </div>
         </div>
       )}
+
+      {/* 5. Optional Web Recon & Discovery Modules (Strictly Opt-In) */}
+      <div className="card-industrial p-4 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-theme-subtle pb-2">
+          <div>
+            <h2 className="text-xs font-bold uppercase tracking-wider text-theme-secondary flex items-center space-x-2">
+              <Search className="w-3.5 h-3.5 text-theme-accent" />
+              <span>{L('5. Optional Web Recon & Discovery Modules (Opt-In)', '5. Moduli Facoltativi Web Recon & Discovery')}</span>
+            </h2>
+            <p className="text-[11px] text-theme-muted mt-0.5">
+              {L(
+                'Disabled by default. Enable explicitly to discover subdomains (SubRaptor + httpx + Subzy + DNS Zone) or enumerate directories (Feroxbuster).',
+                'Disattivati di default. Abilita solo se vuoi includere scoperta sottodomini (SubRaptor + httpx + Subzy + DNS Zone) o enumerazione directory (Feroxbuster).'
+              )}
+            </p>
+          </div>
+          {selectedAgentId && (
+            <span className="text-[11px] font-mono text-amber-400">
+              {L('Local server execution only (not delegated to Remote Probes)', 'Disponibile solo in scansione locale (non su Sonda Remota)')}
+            </span>
+          )}
+        </div>
+
+        <div className={`grid grid-cols-1 lg:grid-cols-2 gap-4 ${selectedAgentId ? 'opacity-50 pointer-events-none' : ''}`}>
+          {/* Module A: Subdomain & DNS / Takeover Intelligence */}
+          <div className={`p-3 rounded border space-y-3 transition ${enableSubdomainEnum ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel'}`}>
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <div>
+                <div className="text-xs font-bold text-theme-primary">
+                  {L('SubRaptor Subdomain, Live httpx, Takeover & DNS Zone', 'SubRaptor Sottodomini, Live httpx, Takeover & Zona DNS')}
+                </div>
+                <div className="text-[11px] text-theme-secondary mt-0.5">
+                  {L('Passive Subfinder + Assetfinder + crt.sh aggregation, AXFR/SPF/DMARC audit, httpx probe & Subzy takeover verification.', 'Aggregazione passiva Subfinder + Assetfinder + crt.sh, audit AXFR/SPF/DMARC, probe httpx e verifica Subzy Takeover.')}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableSubdomainEnum}
+                onChange={(e) => setEnableSubdomainEnum(e.target.checked)}
+                className="mt-1 h-4 w-4 accent-theme-accent shrink-0"
+              />
+            </label>
+
+            {enableSubdomainEnum && (
+              <div className="pt-2 border-t border-theme-subtle space-y-3 text-xs">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-theme-secondary">
+                      {L('Subdomain Discovery Wordlist (DNS Bruteforce)', 'Wordlist Sottodomini (DNS Bruteforce)')}
+                    </span>
+                    <label className="inline-flex items-center space-x-1 text-[11px] text-theme-accent hover:underline cursor-pointer font-semibold">
+                      {uploadingCategory === 'dns' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                      <span>{L('Upload Custom .txt', 'Carica .txt Custom')}</span>
+                      <input
+                        type="file"
+                        accept=".txt"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleUploadCustomWordlist('dns', e.target.files?.[0] || null);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <select
+                    value={subdomainWordlist}
+                    onChange={(e) => setSubdomainWordlist(e.target.value)}
+                    className="input-industrial w-full px-2.5 py-1.5 text-xs font-mono"
+                  >
+                    {(wordlistsData.dns.length > 0
+                      ? wordlistsData.dns
+                      : [
+                          { id: 'n0kovo', name: 'n0kovo_subdomains.txt (SecLists)', source: 'seclists' as const },
+                          { id: 'top1m_110k', name: 'subdomains-top1million-110000.txt (SecLists)', source: 'seclists' as const },
+                          { id: 'italian', name: 'italian-subdomains.txt (SecLists)', source: 'seclists' as const },
+                        ]
+                    ).map((w) => (
+                      <option key={w.id} value={w.id} className="bg-panel text-theme-primary">
+                        {w.name}
+                      </option>
+                    ))}
+                    <option value="passive_only" className="bg-panel text-theme-primary">
+                      {L('Passive Only (Subfinder + crt.sh + Assetfinder — No Bruteforce)', 'Solo Passivo (Subfinder + crt.sh + Assetfinder — Nessun Bruteforce)')}
+                    </option>
+                  </select>
+
+                  {wordlistsData.dns.some((w) => w.source === 'custom') && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {wordlistsData.dns
+                        .filter((w) => w.source === 'custom')
+                        .map((cw) => (
+                          <span key={cw.id} className="inline-flex items-center space-x-1 px-2 py-0.5 rounded border border-theme bg-panel text-[10px] font-mono text-theme-secondary">
+                            <span>{cw.filename}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCustomWordlist('dns', cw.filename)}
+                              className="text-red-400 hover:text-red-300"
+                              title={L('Delete custom wordlist', 'Elimina wordlist')}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <span className="font-semibold text-theme-secondary block">
+                    {L('Verification & Security Checks', 'Controlli di Verifica & Sicurezza')}
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                    {[
+                      { id: 'httpx', label: L('Live httpx Probe', 'Live httpx Probe') },
+                      { id: 'takeover', label: L('Subzy Takeover', 'Subzy Takeover') },
+                      { id: 'dns_zone', label: L('DNS Zone / AXFR', 'DNS Zone / AXFR') },
+                    ].map((chk) => (
+                      <label
+                        key={chk.id}
+                        className="flex items-center space-x-1.5 p-1.5 rounded border border-theme bg-panel cursor-pointer text-[11px] text-theme-secondary hover:text-theme-primary"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={subdomainChecks.includes(chk.id)}
+                          onChange={() => toggleSubdomainCheck(chk.id)}
+                          className="rounded"
+                        />
+                        <span>{chk.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <label className="flex items-center space-x-2 text-[11px] text-theme-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={cascadeSubdomains}
+                      onChange={(e) => setCascadeSubdomains(e.target.checked)}
+                      className="rounded"
+                    />
+                    <span>{L('Pass live subdomains to Web/Nuclei/ZAP/Feroxbuster', 'Passa sottodomini vivi ai motori Web/Nuclei/ZAP/Feroxbuster')}</span>
+                  </label>
+                  {cascadeSubdomains && (
+                    <div className="flex items-center space-x-1.5 text-[11px] font-mono">
+                      <span className="text-theme-muted">{L('Max hosts:', 'Max host:')}</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={cascadeLimit}
+                        onChange={(e) => setCascadeLimit(Math.max(1, Math.min(50, Number(e.target.value) || 20)))}
+                        className="input-industrial w-14 px-2 py-0.5 text-xs text-center"
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Module B: Feroxbuster Directory Enumeration */}
+          <div className={`p-3 rounded border space-y-3 transition ${enableDirEnum ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel'}`}>
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <div>
+                <div className="text-xs font-bold text-theme-primary">
+                  {L('Feroxbuster Directory & Content Enumeration', 'Feroxbuster Enumerazione Directory & Contenuti')}
+                </div>
+                <div className="text-[11px] text-theme-secondary mt-0.5">
+                  {L('Fast wildcard-filtered content discovery with SecLists or custom wordlists, sensitive file flagging & proxy/Tor support.', 'Scoperta rapida percorsi con auto-filtro wildcard, wordlist SecLists o custom, alert file critici e supporto proxy/Tor.')}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableDirEnum}
+                onChange={(e) => setEnableDirEnum(e.target.checked)}
+                className="mt-1 h-4 w-4 accent-theme-accent shrink-0"
+              />
+            </label>
+
+            {enableDirEnum && (
+              <div className="pt-2 border-t border-theme-subtle space-y-3 text-xs">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-theme-secondary">
+                      {L('Directory Enumeration Wordlist', 'Wordlist Enumerazione Directory')}
+                    </span>
+                    <label className="inline-flex items-center space-x-1 text-[11px] text-theme-accent hover:underline cursor-pointer font-semibold">
+                      {uploadingCategory === 'web' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                      <span>{L('Upload Custom .txt', 'Carica .txt Custom')}</span>
+                      <input
+                        type="file"
+                        accept=".txt"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleUploadCustomWordlist('web', e.target.files?.[0] || null);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <select
+                    value={dirWordlist}
+                    onChange={(e) => setDirWordlist(e.target.value)}
+                    className="input-industrial w-full px-2.5 py-1.5 text-xs font-mono"
+                  >
+                    {(wordlistsData.web.length > 0
+                      ? wordlistsData.web
+                      : [
+                          { id: 'dirbuster_medium', name: 'DirBuster 2.3 Medium (SecLists)', source: 'seclists' as const },
+                          { id: 'dirbuster_big', name: 'DirBuster 2.3 Big (SecLists)', source: 'seclists' as const },
+                        ]
+                    ).map((w) => (
+                      <option key={w.id} value={w.id} className="bg-panel text-theme-primary">
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+
+                  {wordlistsData.web.some((w) => w.source === 'custom') && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {wordlistsData.web
+                        .filter((w) => w.source === 'custom')
+                        .map((cw) => (
+                          <span key={cw.id} className="inline-flex items-center space-x-1 px-2 py-0.5 rounded border border-theme bg-panel text-[10px] font-mono text-theme-secondary">
+                            <span>{cw.filename}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCustomWordlist('web', cw.filename)}
+                              className="text-red-400 hover:text-red-300"
+                              title={L('Delete custom wordlist', 'Elimina wordlist')}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div>
+                    <label className="text-[11px] font-semibold text-theme-secondary block mb-1">
+                      {L('Extensions (optional)', 'Estensioni (opzionale)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={dirExtensions}
+                      onChange={(e) => setDirExtensions(e.target.value)}
+                      placeholder="php,txt,bak,json"
+                      className="input-industrial w-full px-2.5 py-1 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-theme-secondary block mb-1">
+                      {L('Rate Limit (req/s)', 'Rate Limit (req/s)')}
+                    </label>
+                    <input
+                      type="number"
+                      min={10}
+                      max={500}
+                      value={dirRateLimit}
+                      onChange={(e) => setDirRateLimit(Math.max(10, Math.min(500, Number(e.target.value) || 100)))}
+                      className="input-industrial w-full px-2.5 py-1 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-theme-secondary block mb-1">
+                      {L('Time Limit (sec)', 'Limite Tempo (sec)')}
+                    </label>
+                    <input
+                      type="number"
+                      min={30}
+                      max={600}
+                      value={dirTimeLimit}
+                      onChange={(e) => setDirTimeLimit(Math.max(30, Math.min(600, Number(e.target.value) || 180)))}
+                      className="input-industrial w-full px-2.5 py-1 text-xs font-mono"
+                    />
+                  </div>
+                </div>
+
+                <label className="flex items-center space-x-2 text-[11px] text-theme-secondary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={dirRecursion}
+                    onChange={(e) => setDirRecursion(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span>{L('Enable recursive scanning (max depth 2 — slower)', 'Abilita scansione ricorsiva (profondità max 2 — più lenta)')}</span>
+                </label>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
         </div>
       </div>
     </div>

@@ -11,6 +11,16 @@ from backend.scanners.nmap_engine import detect_nmap, install_nmap
 from backend.scanners.nuclei_engine import detect_nuclei, install_nuclei
 from backend.scanners.zap_engine import detect_zap, install_zap
 from backend.scanners.tor_engine import detect_tor, install_tor
+from backend.scanners.recon_engine import (
+    detect_subfinder,
+    install_subfinder,
+    detect_httpx,
+    install_httpx,
+    detect_feroxbuster,
+    install_feroxbuster,
+    detect_subzy,
+    install_subzy,
+)
 
 _STATE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()
@@ -23,6 +33,10 @@ BOOTSTRAP_STATE: Dict[str, Any] = {
         "nuclei": {"status": "idle", "message": ""},
         "zap": {"status": "idle", "message": ""},
         "tor": {"status": "idle", "message": ""},
+        "subfinder": {"status": "idle", "message": ""},
+        "httpx": {"status": "idle", "message": ""},
+        "feroxbuster": {"status": "idle", "message": ""},
+        "subzy": {"status": "idle", "message": ""},
     },
 }
 
@@ -38,7 +52,7 @@ def _set_engine_state(engine: str, status: str, message: str = "") -> None:
 
 
 async def ensure_all_engines(force: bool = False) -> Dict[str, Any]:
-    """Check Nmap, Nuclei, OWASP ZAP, and Tor and install any missing engines sequentially."""
+    """Check Nmap, Nuclei, OWASP ZAP, Tor, and Web Recon engines and install any missing components sequentially."""
     if not _RUN_LOCK.acquire(blocking=False):
         return get_bootstrap_state()
 
@@ -52,6 +66,10 @@ async def ensure_all_engines(force: bool = False) -> Dict[str, Any]:
             ("nuclei", detect_nuclei, install_nuclei),
             ("zap", detect_zap, install_zap),
             ("tor", detect_tor, install_tor),
+            ("subfinder", detect_subfinder, install_subfinder),
+            ("httpx", detect_httpx, install_httpx),
+            ("feroxbuster", detect_feroxbuster, install_feroxbuster),
+            ("subzy", detect_subzy, install_subzy),
         ]
 
         for name, detect_fn, install_fn in checks:
@@ -96,6 +114,10 @@ def start_engine_bootstrap_background(force: bool = False, allow_in_test: bool =
         ("nuclei", detect_nuclei),
         ("zap", detect_zap),
         ("tor", detect_tor),
+        ("subfinder", detect_subfinder),
+        ("httpx", detect_httpx),
+        ("feroxbuster", detect_feroxbuster),
+        ("subzy", detect_subzy),
     ):
         det = detect_fn()
         if det.get("installed"):
@@ -134,11 +156,11 @@ def main() -> int:
     engines = state.get("engines", {})
     all_ok = True
     print("\n=== UrielScan Engines Provisioning Summary ===")
-    for name in ("nmap", "nuclei", "zap", "tor"):
+    for name in ("nmap", "nuclei", "zap", "tor", "subfinder", "httpx", "feroxbuster", "subzy"):
         info = engines.get(name, {})
         st = info.get("status", "unknown")
         msg = info.get("message", "")
-        print(f"  - {name:<7}: {st.upper():<9} {msg}")
+        print(f"  - {name:<12}: {st.upper():<9} {msg}")
         if st != "installed":
             all_ok = False
     return 0 if all_ok else 1

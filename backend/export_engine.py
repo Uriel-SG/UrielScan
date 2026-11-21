@@ -309,6 +309,7 @@ def generate_pdf_document(
     include_host_topology: bool = True,
     org_map: Optional[Dict[int, Dict[str, Any]]] = None,
     lang: str = "en",
+    recon_summary: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Generates a structured, printable A4 PDF report/export using ReportLab."""
     findings = sort_findings_by_severity(findings)
@@ -522,6 +523,77 @@ def generate_pdf_document(
         story.append(ht)
         story.append(Spacer(1, 4 * mm))
 
+    # Optional Recon & Attack Surface Intelligence
+    if isinstance(recon_summary, dict) and (
+        recon_summary.get("total_subdomains")
+        or recon_summary.get("dns_zones")
+        or recon_summary.get("takeovers")
+        or recon_summary.get("directories")
+    ):
+        r_title = "Superficie d'Attacco & Web Recon (SubRaptor / httpx / Subzy / Feroxbuster)" if is_it else "Attack Surface & Web Recon Intelligence (SubRaptor / httpx / Subzy / Feroxbuster)"
+        story.append(Paragraph(r_title, h2_style))
+        live_subs = recon_summary.get("live_subdomains") or []
+        takeovers = recon_summary.get("takeovers") or []
+        dirs = recon_summary.get("directories") or []
+        dns_zones = recon_summary.get("dns_zones") or []
+        axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
+        story.append(
+            Paragraph(
+                f"Subdomains: <b>{int(recon_summary.get('total_subdomains') or 0)}</b> | "
+                f"Live HTTP/S: <b>{len(live_subs)}</b> | "
+                f"Takeovers: <b>{len(takeovers)}</b> | "
+                f"AXFR Open: <b>{axfr_open}</b> | "
+                f"Directories: <b>{len(dirs)}</b>",
+                body_style,
+            )
+        )
+        story.append(Spacer(1, 2 * mm))
+        if live_subs:
+            sub_rows = [["Subdomain", "Status", "Title / Server", "Tech Stack"]]
+            for lr in live_subs[:20]:
+                tech_str = ", ".join((lr.get("tech") or [])[:4]) or "-"
+                ts = f"{lr.get('title') or ''} ({lr.get('webserver') or ''})".strip(" ()") or "-"
+                sub_rows.append([
+                    Paragraph(_safe_para_text(str(lr.get("subdomain") or "")), small_muted),
+                    str(lr.get("status_code") or "-"),
+                    Paragraph(_safe_para_text(ts[:60]), small_muted),
+                    Paragraph(_safe_para_text(tech_str[:45]), small_muted),
+                ])
+            st = Table(sub_rows, colWidths=[52 * mm, 16 * mm, 64 * mm, 48 * mm], repeatRows=1)
+            st.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a5f")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(st)
+            story.append(Spacer(1, 3 * mm))
+        if dirs:
+            dir_rows = [["Status", "Discovered Path / URL", "Size"]]
+            for d in dirs[:25]:
+                dir_rows.append([
+                    str(d.get("status") or "-"),
+                    Paragraph(_safe_para_text(str(d.get("url") or d.get("path") or "")[:95]), small_muted),
+                    f"{int(d.get('content_length') or 0)} B",
+                ])
+            dt = Table(dir_rows, colWidths=[18 * mm, 136 * mm, 26 * mm], repeatRows=1)
+            dt.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#334155")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(dt)
+            story.append(Spacer(1, 4 * mm))
+
     # Findings Detail
     story.append(Paragraph(
         f"4. Inventario Vulnerabilita & Evidenze ({len(findings)})" if is_it else f"4. Vulnerability & Evidence Inventory ({len(findings)})",
@@ -587,6 +659,7 @@ def generate_docx_report(
     include_evidence: bool = True,
     include_host_topology: bool = True,
     lang: str = "en",
+    recon_summary: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Generates an editable OpenXML (.docx) report compatible with Microsoft Word,
@@ -792,6 +865,50 @@ def generate_docx_report(
             ports_txt = ", ".join(f"{p.get('port')}/{p.get('protocol', 'tcp')}" for p in h.get("ports", [])) or no_p_str
             h_rows.append([str(h.get("ip", "")), str(h.get("hostname", "")), str(h.get("os", na_str)), ports_txt])
         body_parts.append(table_xml(h_rows))
+        body_parts.append(p_xml("", space_after=120))
+
+    # Optional Attack Surface & Web Recon section
+    if isinstance(recon_summary, dict) and (
+        recon_summary.get("total_subdomains")
+        or recon_summary.get("dns_zones")
+        or recon_summary.get("takeovers")
+        or recon_summary.get("directories")
+    ):
+        body_parts.append(heading_xml(
+            "Superficie d'Attacco & Web Recon (SubRaptor / httpx / Subzy / Feroxbuster)"
+            if is_it else "Attack Surface & Web Recon Intelligence (SubRaptor / httpx / Subzy / Feroxbuster)",
+            level=2,
+        ))
+        live_subs = recon_summary.get("live_subdomains") or []
+        takeovers = recon_summary.get("takeovers") or []
+        dns_zones = recon_summary.get("dns_zones") or []
+        dirs = recon_summary.get("directories") or []
+        axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
+        body_parts.append(p_xml(
+            f"Subdomains: {int(recon_summary.get('total_subdomains') or 0)} | "
+            f"Live HTTP/S: {len(live_subs)} | Takeovers: {len(takeovers)} | "
+            f"AXFR Open: {axfr_open} | Directories: {len(dirs)}",
+            bold=True,
+        ))
+        if live_subs:
+            sub_rows = [["URL / Subdomain", "Status", "Title", "Tech"]]
+            for lr in live_subs[:25]:
+                sub_rows.append([
+                    str(lr.get("url") or lr.get("subdomain") or ""),
+                    str(lr.get("status_code") or "-"),
+                    str(lr.get("title") or "-")[:60],
+                    ", ".join((lr.get("tech") or [])[:4]) or "-",
+                ])
+            body_parts.append(table_xml(sub_rows))
+        if dirs:
+            dir_rows = [["Status", "URL / Path", "Size"]]
+            for d in dirs[:25]:
+                dir_rows.append([
+                    str(d.get("status") or "-"),
+                    str(d.get("url") or d.get("path") or ""),
+                    f"{int(d.get('content_length') or 0)} B",
+                ])
+            body_parts.append(table_xml(dir_rows))
         body_parts.append(p_xml("", space_after=120))
 
     # Section 4: Findings

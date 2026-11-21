@@ -90,6 +90,30 @@ export const Navbar: React.FC<NavbarProps> = ({
       meta: engineStatus.zap?.version || 'Web App',
     },
     {
+      id: 'subfinder',
+      name: 'SubRaptor / Subfinder',
+      active: Boolean(engineStatus.subfinder?.available),
+      meta: engineStatus.subfinder?.version || 'Subdomains',
+    },
+    {
+      id: 'httpx',
+      name: 'PD httpx',
+      active: Boolean(engineStatus.httpx?.available),
+      meta: engineStatus.httpx?.version || 'Live Probe',
+    },
+    {
+      id: 'feroxbuster',
+      name: 'Feroxbuster',
+      active: Boolean(engineStatus.feroxbuster?.available),
+      meta: engineStatus.feroxbuster?.version || 'Dir Enum',
+    },
+    {
+      id: 'subzy',
+      name: 'Subzy DB',
+      active: Boolean(engineStatus.subzy?.available),
+      meta: engineStatus.subzy?.version || 'Takeover',
+    },
+    {
       id: 'native',
       name: 'Native',
       active: Boolean(engineStatus.native?.available),

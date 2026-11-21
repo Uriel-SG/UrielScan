@@ -14,6 +14,7 @@ data/.session_secret
 data/tor_data/
 data/*.pid
 data/*.log
+data/wordlists/
 reports/*.html
 reports/*.pdf
 reports/*.docx

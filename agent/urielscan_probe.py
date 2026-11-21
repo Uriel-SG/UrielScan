@@ -859,6 +859,28 @@ def _runtime_base_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _configure_windowless_streams() -> None:
+    """Redirect None stdout/stderr (PyInstaller --noconsole / SYSTEM task) cleanly to probe.log."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    import tempfile
+    candidates = [_runtime_base_dir() / "probe.log", Path(tempfile.gettempdir()) / "urielscan_probe.log"]
+    log_fh = None
+    for cand in candidates:
+        try:
+            cand.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = open(cand, "a", encoding="utf-8", buffering=1)
+            break
+        except OSError:
+            continue
+    if log_fh is None:
+        log_fh = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = log_fh
+    if sys.stderr is None:
+        sys.stderr = log_fh
+
+
 def _extract_msi_config_payload(msi_path: Path) -> Dict[str, Any]:
     raw = msi_path.read_bytes()
     start_idx = raw.find(CFG_MARKER_START)
@@ -872,26 +894,84 @@ def _extract_msi_config_payload(msi_path: Path) -> Dict[str, Any]:
     return json.loads(raw_json)
 
 
+def _find_msi_with_config(raw_candidates: List[str], log_fn) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    for raw in raw_candidates:
+        cleaned = (raw or "").strip().strip('"')
+        if not cleaned or cleaned.startswith("["):
+            continue
+        p = Path(cleaned)
+        if not p.is_file():
+            continue
+        try:
+            cfg = _extract_msi_config_payload(p)
+            if isinstance(cfg, dict) and cfg.get("token"):
+                log_fn(f"Loaded config from candidate MSI: {p}")
+                return p, cfg
+        except Exception as exc:
+            log_fn(f"Skipped candidate MSI {p}: {exc}")
+
+    # Fallback: search recent *.msi files in C:\Windows\Installer (last 15 min, newest 8)
+    win_inst = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Installer"
+    if win_inst.is_dir():
+        now = time.time()
+        recent: List[Tuple[float, Path]] = []
+        try:
+            for item in win_inst.iterdir():
+                if item.is_file() and item.suffix.lower() == ".msi":
+                    try:
+                        mt = item.stat().st_mtime
+                        if now - mt <= 900.0:
+                            recent.append((mt, item))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        recent.sort(key=lambda x: x[0], reverse=True)
+        for _, msi_cand in recent[:8]:
+            try:
+                cfg = _extract_msi_config_payload(msi_cand)
+                if isinstance(cfg, dict) and cfg.get("token"):
+                    log_fn(f"Loaded config from Windows Installer cache: {msi_cand}")
+                    return msi_cand, cfg
+            except Exception:
+                continue
+    return None
+
+
 def _install_from_msi_data(raw_data: str) -> None:
     parts: Dict[str, str] = {}
-    for seg in raw_data.split(";"):
+    for seg in (raw_data or "").split(";"):
         if "=" in seg:
             k, v = seg.split("=", 1)
             parts[k.strip().lower()] = v.strip()
 
     base_dir = _runtime_base_dir()
-    install_dir = Path(parts.get("dir") or str(base_dir)).resolve()
-    msi_raw = parts.get("msi", "").strip().strip('"')
-    msi_path = Path(msi_raw) if msi_raw else None
-    if not msi_path or not msi_path.exists():
-        # Fallback: look for CachedPackage passed or exit gracefully if config already exists
+    raw_dir = (parts.get("dir") or "").strip().strip('"')
+    if not raw_dir or raw_dir.startswith("["):
+        raw_dir = str(base_dir)
+    install_dir = Path(raw_dir).resolve()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    log_path = install_dir / "msi_install.log"
+
+    def _msi_log(msg: str) -> None:
+        line = f"[{datetime.now(timezone.utc).isoformat()}] {msg}\n"
+        try:
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(line)
+        except OSError:
+            pass
+
+    _msi_log(f"Starting MSI post-install (raw_data={raw_data!r})")
+    found = _find_msi_with_config([parts.get("db", ""), parts.get("msi", "")], _msi_log)
+    if not found:
         cfg_file = install_dir / "probe_config.json"
         if cfg_file.exists():
+            _msi_log("Using pre-existing probe_config.json")
             return
-        raise RuntimeError(f"Installer database not found: {msi_path}")
+        _msi_log("ERROR: Unable to locate MSI payload configuration.")
+        raise RuntimeError("Installer database config payload not found.")
 
-    cfg = _extract_msi_config_payload(msi_path)
-    install_dir.mkdir(parents=True, exist_ok=True)
+    _, cfg = found
 
     ca_pem = str(cfg.pop("ca_pem", "") or "").strip()
     ca_path = install_dir / "cacert.pem"
@@ -907,17 +987,22 @@ def _install_from_msi_data(raw_data: str) -> None:
 
     cfg_path = install_dir / "probe_config.json"
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    _msi_log(f"Wrote probe_config.json for server={cfg.get('server_url')}")
 
     exe_path = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else (install_dir / "urielscan_probe.exe")
-    if os.name == "nt" and exe_path.exists():
+    if os.name == "nt" and exe_path.exists() and os.environ.get("URIELSCAN_MSI_SKIP_TASK") != "1":
         task_name = "UrielScanRemoteProbe"
         cmd_tr = f'"{exe_path}" --config "{cfg_path}"'
-        subprocess.run(
+        r1 = subprocess.run(
             ["schtasks", "/Create", "/F", "/TN", task_name, "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", cmd_tr],
             capture_output=True,
+            text=True,
             check=False,
         )
-        subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True, check=False)
+        r2 = subprocess.run(["schtasks", "/Run", "/TN", task_name], capture_output=True, text=True, check=False)
+        _msi_log(f"schtasks Create rc={r1.returncode}, Run rc={r2.returncode}")
+    else:
+        _msi_log("Skipped schtasks registration.")
 
 
 def _uninstall_probe_service(install_dir_raw: str) -> None:
@@ -939,6 +1024,8 @@ def _uninstall_probe_service(install_dir_raw: str) -> None:
 
 
 def main():
+    _configure_windowless_streams()
+
     parser = argparse.ArgumentParser(description="UrielScan Standalone Remote Probe Agent")
     parser.add_argument("--config", default="", help="Percorso probe_config.json (auto-rilevato nella cartella dell'eseguibile se presente)")
     parser.add_argument("--server", default="", help="UrielScan server URL (es. https://uriel.msp.com o http://127.0.0.1:8000)")
@@ -948,12 +1035,12 @@ def main():
     parser.add_argument("--interval", type=int, default=5, help="Intervallo polling e heartbeat in secondi (default: 5)")
     parser.add_argument("--insecure", action="store_true", help="Disabilita verifica certificato SSL del server (per certificati self-signed)")
     parser.add_argument("--once", action="store_true", help="Esegue un solo ciclo di heartbeat/job ed esce")
-    parser.add_argument("--install-from-msi-data", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--install-from-msi-data", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--uninstall-probe", default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
-    if args.install_from_msi_data:
+    if args.install_from_msi_data is not None:
         _install_from_msi_data(args.install_from_msi_data)
         return
 

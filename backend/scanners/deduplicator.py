@@ -13,12 +13,17 @@ SEVERITY_RANK: Dict[str, int] = {
 ENGINE_ORDER: Dict[str, int] = {
     "zap": 0,
     "nuclei": 1,
-    "nmap": 2,
-    "native_web": 3,
-    "native_ssl": 4,
-    "native_net": 5,
-    "native_probe": 6,
-    "native": 7,
+    "subzy": 2,
+    "dns_zone": 3,
+    "feroxbuster": 4,
+    "httpx": 5,
+    "nmap": 6,
+    "native_web": 7,
+    "native_ssl": 8,
+    "native_net": 9,
+    "subraptor": 10,
+    "native_probe": 11,
+    "native": 12,
 }
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)

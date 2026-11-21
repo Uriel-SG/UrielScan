@@ -1156,6 +1156,9 @@ def test_probe_self_contained_installers():
         embedded_cfg = json.loads(msi_bytes[s_idx:e_idx].decode("utf-8").strip())
         assert embedded_cfg["token"] == token
         assert embedded_cfg["server_url"] == "https://uriel.example.test:8443"
+        # Regression check: Type 3090 deferred EXE custom action must evaluate properties directly (never [CustomActionData])
+        assert b"[CustomActionData]" not in msi_bytes
+        assert b"msi=[OriginalDatabase];db=[DATABASE];dir=[INSTALLDIR];" in msi_bytes
 
         # 2. Linux self-contained .sh (also testing token rotation when token omitted)
         sh_resp = client.post(
@@ -1462,3 +1465,178 @@ def test_tor_onion_routing_and_socks5_tunnel(monkeypatch):
     assert ok_scan.status_code == 201
     created = ok_scan.json()
     assert created["config"].get("onion_mode") is True
+
+
+def test_web_recon_subraptor_takeover_feroxbuster_and_wordlists(tmp_path, monkeypatch):
+    import asyncio
+    import io
+    import json
+    import zipfile
+    import backend.main as main_mod
+    from backend.database import get_db_connection
+    from backend.export_engine import generate_docx_report, generate_pdf_document
+    from backend.report_engine import generate_html_report
+    from backend.scanners import recon_engine, wordlists
+
+    # 1. Wordlists catalog & custom upload/delete security
+    monkeypatch.setattr(wordlists, "PRESET_WORDLISTS_DIR", tmp_path / "bin_wl")
+    monkeypatch.setattr(wordlists, "CUSTOM_WORDLISTS_DIR", tmp_path / "custom_wl")
+
+    wl_resp = client.get("/api/wordlists")
+    assert wl_resp.status_code == 200
+    wl_data = wl_resp.json()
+    assert [w["id"] for w in wl_data["dns"][:3]] == ["n0kovo", "top1m_110k", "italian"]
+    assert [w["id"] for w in wl_data["web"][:2]] == ["dirbuster_medium", "dirbuster_big"]
+
+    # Reject binary NUL payload
+    bad_up = client.post(
+        "/api/wordlists/upload",
+        data={"category": "web"},
+        files={"file": ("evil.txt", b"\x00\x01binary", "text/plain")},
+    )
+    assert bad_up.status_code == 400
+
+    # Upload valid custom wordlist
+    good_up = client.post(
+        "/api/wordlists/upload",
+        data={"category": "dns"},
+        files={"file": ("../my_custom.txt", b"api\nstaging\n# comment\nadmin\n", "text/plain")},
+    )
+    assert good_up.status_code == 200
+    wl_item = good_up.json()["wordlist"]
+    assert wl_item["filename"] == "my_custom.txt"
+    assert wl_item["lines"] == 3
+    assert any(w["id"] == "custom:my_custom.txt" for w in client.get("/api/wordlists").json()["dns"])
+
+    del_up = client.delete("/api/wordlists/dns/my_custom.txt")
+    assert del_up.status_code == 200
+    assert not any(w["id"] == "custom:my_custom.txt" for w in client.get("/api/wordlists").json()["dns"])
+
+    # 2. SubRaptor domain extraction, normalization & Found/Unique stats
+    assert recon_engine.extract_domain_targets("https://App.Example.COM:8443/login, 192.168.1.1, 10.0.0.0/24") == [
+        "app.example.com"
+    ]
+    norm = recon_engine.normalize_subdomains(
+        ["*.API.Example.COM.", "dev.example.com", "not_valid$", "evil.com"],
+        "example.com",
+    )
+    assert norm == ["api.example.com", "dev.example.com"]
+
+    stats = recon_engine.compute_subraptor_source_stats({
+        "subfinder": ("ok", {"a.example.com", "b.example.com"}),
+        "crtsh": ("ok", {"b.example.com", "c.example.com"}),
+    })
+    assert stats["subfinder"] == {"status": "ok", "found": 2, "unique": 1}
+    assert stats["crtsh"] == {"status": "ok", "found": 2, "unique": 1}
+
+    # 3. Native Subzy / can-i-take-over-xyz takeover check
+    fp_file = tmp_path / "fingerprints.json"
+    fp_file.write_text(json.dumps([{
+        "service": "GitHub Pages",
+        "cname": ["github.io"],
+        "fingerprint": "There isn't a GitHub Pages site here.",
+        "vulnerable": True,
+        "status": "Vulnerable",
+        "nxdomain": False,
+    }]), encoding="utf-8")
+    monkeypatch.setattr(recon_engine, "SUBZY_FP_PATH", fp_file)
+
+    class _FakeResp:
+        def __init__(self, code: int, text: str):
+            self.status_code = code
+            self.text = text
+
+    class _FakeAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            return _FakeResp(404, "<html>There isn't a GitHub Pages site here.</html>")
+
+    monkeypatch.setattr(recon_engine.httpx, "AsyncClient", _FakeAsyncClient)
+    tk_hits, tk_findings = asyncio.run(
+        recon_engine.run_subzy_takeover_check(
+            ["orphan.example.com"],
+            [{"subdomain": "orphan.example.com", "url": "https://orphan.example.com", "status_code": 404, "cname": ["user.github.io"]}],
+            onion_mode=True,
+        )
+    )
+    assert len(tk_hits) == 1
+    assert tk_hits[0]["service"] == "GitHub Pages"
+    assert tk_findings[0]["severity"] == "high"
+    assert tk_findings[0]["source_engine"] == "subzy"
+
+    # 4. Feroxbuster JSONL parsing & classification
+    sample_jsonl = "\n".join([
+        json.dumps({"type": "statistics", "requests": 100}),
+        json.dumps({"type": "response", "url": "https://example.com/.env", "path": "/.env", "status": 200, "content_length": 512}),
+        json.dumps({"type": "response", "url": "https://example.com/admin", "path": "/admin", "status": 403, "content_length": 120}),
+        json.dumps({"type": "response", "url": "https://example.com/assets", "path": "/assets", "status": 301, "content_length": 0}),
+    ])
+    parsed_dirs = recon_engine.parse_feroxbuster_jsonl(sample_jsonl)
+    assert len(parsed_dirs) == 3
+    dir_findings = recon_engine.classify_feroxbuster_results(parsed_dirs, "https://example.com")
+    sevs = sorted(f["severity"] for f in dir_findings)
+    assert sevs == ["high", "info", "medium"]
+
+    # 5. System status includes all 4 recon engines & opt-in defaults on POST /api/scans
+    sys_engines = client.get("/api/system/status").json()["engines"]
+    for k in ("subfinder", "httpx", "feroxbuster", "subzy"):
+        assert k in sys_engines
+
+    monkeypatch.setattr(main_mod, "start_scan_in_background", lambda scan_id: None)
+    default_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Default Opt-In Check",
+        "targets": "example.com",
+        "engines": ["native_web"],
+    }).json()
+    assert not default_scan["config"].get("enable_subdomain_enum")
+    assert not default_scan["config"].get("enable_dir_enum")
+
+    recon_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Full Recon Opt-In",
+        "targets": "example.com",
+        "engines": ["native_web"],
+        "enable_subdomain_enum": True,
+        "subdomain_wordlist": "italian",
+        "subdomain_checks": ["httpx", "takeover"],
+        "enable_dir_enum": True,
+        "dir_wordlist": "dirbuster_big",
+    }).json()
+    assert recon_scan["config"]["enable_subdomain_enum"] is True
+    assert recon_scan["config"]["subdomain_wordlist"] == "italian"
+    assert recon_scan["config"]["enable_dir_enum"] is True
+    assert recon_scan["config"]["dir_wordlist"] == "dirbuster_big"
+
+    # 6. HTML / PDF / DOCX reports render Attack Surface & Recon summary cleanly
+    recon_payload = {
+        "total_subdomains": 2,
+        "sources": {"example.com": {"subfinder": {"status": "ok", "found": 2, "unique": 1}}},
+        "live_subdomains": [{"subdomain": "sub.example.com", "url": "https://sub.example.com", "status_code": 200, "title": "Portal", "tech": ["Nginx"]}],
+        "takeovers": [],
+        "dns_zones": [{"domain": "example.com", "nameservers": ["ns1.example.com"], "axfr_vulnerable": False, "wildcard_dns": False, "has_spf": True, "has_dmarc": True}],
+        "directories": parsed_dirs,
+    }
+    conn = get_db_connection()
+    with conn:
+        conn.execute(
+            "UPDATE scans SET status='completed', summary_json=? WHERE id=?;",
+            (json.dumps({"total_hosts": 1, "total_findings": 1, "risk_score": 40, "recon": recon_payload}), int(recon_scan["id"])),
+        )
+    conn.close()
+
+    html_rep = generate_html_report(int(recon_scan["id"]), lang="en")
+    assert "sub.example.com" in open(html_rep["file_path"], encoding="utf-8").read()
+    pdf_bytes = generate_pdf_document("Recon PDF", "CONFIDENTIAL", {}, {"name": "Client"}, "example.com", [], dir_findings, recon_summary=recon_payload)
+    assert pdf_bytes.startswith(b"%PDF")
+    docx_bytes = generate_docx_report("Recon DOCX", "CONFIDENTIAL", {}, {"name": "Client"}, "example.com", [], dir_findings, recon_summary=recon_payload)
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
+        assert "sub.example.com" in zf.read("word/document.xml").decode("utf-8")
