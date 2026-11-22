@@ -810,6 +810,8 @@ export const api = {
     dir_max_depth?: number;
     dir_rate_limit?: number;
     dir_time_limit?: number;
+    enable_tech_fingerprint?: boolean;
+    enable_cve_intel?: boolean;
   }): Promise<Scan> {
     const res = await fetch(`${API_BASE}/scans`, {
       method: 'POST',

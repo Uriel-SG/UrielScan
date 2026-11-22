@@ -253,6 +253,8 @@ class ScanCreateModel(BaseModel):
     dir_max_depth: Optional[int] = 2
     dir_rate_limit: Optional[int] = 100
     dir_time_limit: Optional[int] = 180
+    enable_tech_fingerprint: Optional[bool] = True
+    enable_cve_intel: Optional[bool] = True
 
 
 class ProxyTestRequest(BaseModel):
@@ -974,6 +976,10 @@ async def create_and_start_scan(payload: ScanCreateModel):
         cfg["dir_rate_limit"] = max(10, min(int(payload.dir_rate_limit), 500))
     if payload.dir_time_limit is not None:
         cfg["dir_time_limit"] = max(30, min(int(payload.dir_time_limit), 600))
+    if payload.enable_tech_fingerprint is not None:
+        cfg["enable_tech_fingerprint"] = bool(payload.enable_tech_fingerprint)
+    if payload.enable_cve_intel is not None:
+        cfg["enable_cve_intel"] = bool(payload.enable_cve_intel)
 
     profile = payload.scan_type or payload.scan_profile or "standard"
 

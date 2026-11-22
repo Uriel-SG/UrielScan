@@ -9,6 +9,7 @@ from backend.scanners.nmap_engine import detect_nmap, run_nmap_scan
 from backend.scanners.nuclei_engine import detect_nuclei, run_nuclei_scan
 from backend.scanners.zap_engine import detect_zap, run_zap_scan, _format_web_urls
 from backend.scanners.recon_engine import run_subraptor_pipeline, run_feroxbuster_scan
+from backend.scanners.tech_cve_engine import run_tech_fingerprint, run_cve_intel_correlation
 from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.nat_guard import (
     check_targets_nat_loopback,
@@ -486,6 +487,59 @@ async def run_scan_pipeline(scan_id: int) -> None:
                 recon_summary["directories"] = dirs_found
             else:
                 append_log("WARN", "[Feroxbuster] Nessun URL Web valido rilevato per l'enumerazione delle directory.")
+
+        if STOP_FLAGS.get(scan_id, False):
+            return
+
+        # -------------------------------------------------------------
+        # 4d. Standalone Tech Stack Fingerprinting & CVE / PoC Intel
+        # -------------------------------------------------------------
+        if config.get("enable_tech_fingerprint", True):
+            update_progress(87, "Fingerprinting Stack Tecnologico (httpx/Wappalyzer & Nmap CPE)...")
+            raw_tokens = [t.strip() for t in targets.replace(",", " ").split() if t.strip()]
+            has_domain_or_url = any(
+                "://" in tok or (not tok.replace(".", "").isdigit() and "/" not in tok)
+                for tok in raw_tokens
+            )
+            web_engine_requested = any(
+                e in engines for e in ("native", "native_web", "native_ssl", "nuclei", "zap")
+            ) or bool(config.get("enable_dir_enum")) or bool(config.get("enable_subdomain_enum"))
+
+            tech_urls: List[str] = []
+            if has_domain_or_url or web_engine_requested or web_capable_hosts:
+                has_cidr = any("/" in t and t.split("/", 1)[1].isdigit() for t in raw_tokens)
+                if not has_cidr and (has_domain_or_url or web_engine_requested):
+                    tech_urls.extend(_format_web_urls(targets))
+                if cascaded_web_urls:
+                    tech_urls.extend(cascaded_web_urls)
+                if web_capable_hosts and not tech_urls:
+                    tech_urls.extend([f"http://{ip}" for ip in web_capable_hosts[:6]])
+                tech_urls = list(dict.fromkeys(u for u in tech_urls if u))
+
+            tech_stack = await run_tech_fingerprint(
+                urls=tech_urls,
+                hosts_dict=all_hosts,
+                existing_live_rows=recon_summary.get("live_subdomains"),
+                proxy_url=active_proxy_url,
+                log_callback=append_log,
+            )
+            if tech_stack:
+                recon_summary["tech_stack"] = tech_stack
+
+        if STOP_FLAGS.get(scan_id, False):
+            return
+
+        if config.get("enable_cve_intel", True) and recon_summary.get("tech_stack"):
+            update_progress(88, "Correlazione CVE recenti, CISA KEV, EPSS & PoC pubblici...")
+            cve_matches, intel_findings = await run_cve_intel_correlation(
+                tech_stack=recon_summary["tech_stack"],
+                proxy_url=active_proxy_url,
+                log_callback=append_log,
+            )
+            if cve_matches:
+                recon_summary["cve_intel"] = cve_matches
+            if intel_findings:
+                all_findings.extend(intel_findings)
 
         if STOP_FLAGS.get(scan_id, False):
             return

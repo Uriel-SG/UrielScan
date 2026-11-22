@@ -24,6 +24,7 @@ ENGINE_ORDER: Dict[str, int] = {
     "subraptor": 10,
     "native_probe": 11,
     "native": 12,
+    "cve_intel": 13,
 }
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)

@@ -853,7 +853,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
               activeTab === 'recon' ? 'border-theme-accent bg-subtle text-theme-primary' : 'border-transparent text-theme-muted hover:text-theme-primary'
             }`}
           >
-            {L('Recon / Surface', 'Recon / Superficie')} ({currentScan.recon.total_subdomains ?? 0} / {currentScan.recon.directories?.length ?? 0})
+            {L('Recon / Surface & Tech', 'Recon / Superficie & Tech')} ({currentScan.recon.tech_stack?.length ?? 0} {L('tech', 'tech')} • {currentScan.recon.total_subdomains ?? 0}/{currentScan.recon.directories?.length ?? 0})
           </button>
         )}
         <button
@@ -1136,7 +1136,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
       {activeTab === 'recon' && currentScan?.recon && (
         <div className="space-y-4">
           {/* Recon KPI Strip */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
             <div className="card-industrial p-3">
               <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Total Subdomains', 'Sottodomini Totali')}</div>
               <div className="text-lg font-bold text-theme-primary font-mono">{currentScan.recon.total_subdomains ?? 0}</div>
@@ -1160,6 +1160,16 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
             <div className="card-industrial p-3">
               <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Directories (Ferox)', 'Directory (Ferox)')}</div>
               <div className="text-lg font-bold text-sky-400 font-mono">{currentScan.recon.directories?.length ?? 0}</div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Tech Stack', 'Stack Tecnologico')}</div>
+              <div className="text-lg font-bold text-theme-accent font-mono">{currentScan.recon.tech_stack?.length ?? 0}</div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('CVE / PoC Intel', 'CVE / PoC Intel')}</div>
+              <div className={`text-lg font-bold font-mono ${(currentScan.recon.cve_intel?.length ?? 0) > 0 ? 'text-amber-400' : 'text-theme-primary'}`}>
+                {currentScan.recon.cve_intel?.length ?? 0}
+              </div>
             </div>
           </div>
 
@@ -1274,6 +1284,116 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                         <td className="py-1.5 pr-3 font-mono text-theme-accent break-all">{d.url || d.path}</td>
                         <td className="py-1.5 pr-3 font-mono text-theme-secondary">{d.content_length ?? 0} B</td>
                         <td className="py-1.5 font-mono text-[11px] text-theme-muted">{d.content_type || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Detected Technology Stack */}
+          {(currentScan.recon.tech_stack?.length ?? 0) > 0 && (
+            <div className="card-industrial p-4 space-y-2">
+              <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                {L('Detected Technology Stack (Wappalyzer / httpx + Nmap CPE)', 'Stack Tecnologico Rilevato (Wappalyzer / httpx + Nmap CPE)')}
+              </div>
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-theme text-[11px] font-mono text-theme-muted">
+                    <tr>
+                      <th className="py-1.5 pr-3">{L('Product', 'Prodotto')}</th>
+                      <th className="py-1.5 pr-3">{L('Version', 'Versione')}</th>
+                      <th className="py-1.5 pr-3">{L('Category', 'Categoria')}</th>
+                      <th className="py-1.5 pr-3">Host / URL</th>
+                      <th className="py-1.5">{L('Source', 'Fonte')}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-theme-subtle">
+                    {(currentScan.recon.tech_stack || []).map((ts, i) => (
+                      <tr key={i} className="hover:bg-subtle">
+                        <td className="py-1.5 pr-3 font-semibold text-theme-primary">{ts.name}</td>
+                        <td className="py-1.5 pr-3 font-mono">
+                          {ts.version ? (
+                            <span className="px-1.5 py-0.5 rounded bg-subtle border border-theme text-[11px] text-theme-accent">
+                              {ts.version}
+                            </span>
+                          ) : (
+                            <span className="text-theme-muted">-</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-3 text-theme-secondary">{ts.category || '-'}</td>
+                        <td className="py-1.5 pr-3 font-mono text-[11px] text-theme-secondary break-all">
+                          {ts.url || `${ts.host || ''}${ts.port ? `:${ts.port}` : ''}`}
+                        </td>
+                        <td className="py-1.5 font-mono text-[11px] text-theme-muted">{ts.source || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* CVE & PoC-in-GitHub Intelligence */}
+          {(currentScan.recon.cve_intel?.length ?? 0) > 0 && (
+            <div className="card-industrial p-4 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                  {L('CVE, CISA KEV, EPSS & PoC-in-GitHub Intelligence (Version-Based)', 'Correlazione CVE, CISA KEV, EPSS & PoC GitHub (Basata su Versione)')}
+                </div>
+                <span className="text-[10px] font-mono text-amber-400">
+                  {L('Verify OS backporting before remediation', 'Verificare eventuale backporting distro OS')}
+                </span>
+              </div>
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-theme text-[11px] font-mono text-theme-muted">
+                    <tr>
+                      <th className="py-1.5 pr-3">CVE ID</th>
+                      <th className="py-1.5 pr-3">{L('Component', 'Componente')}</th>
+                      <th className="py-1.5 pr-3">CVSS / KEV</th>
+                      <th className="py-1.5 pr-3">EPSS</th>
+                      <th className="py-1.5">{L('Public PoCs', 'PoC Pubblici')}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-theme-subtle">
+                    {(currentScan.recon.cve_intel || []).map((ci, i) => (
+                      <tr key={i} className="hover:bg-subtle">
+                        <td className="py-1.5 pr-3 font-mono font-bold text-theme-accent whitespace-nowrap">{ci.cve_id}</td>
+                        <td className="py-1.5 pr-3 font-mono text-theme-primary whitespace-nowrap">
+                          {ci.product} {ci.version}
+                        </td>
+                        <td className="py-1.5 pr-3 font-mono whitespace-nowrap">
+                          <span className="font-bold text-theme-primary">{ci.cvss}</span>
+                          {ci.is_kev && (
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded bg-red-500/20 border border-red-500/40 text-red-400 text-[10px] font-bold">
+                              CISA KEV
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-3 font-mono text-theme-secondary whitespace-nowrap">
+                          {typeof ci.epss === 'number' ? `${(ci.epss * 100).toFixed(2)}%` : '-'}
+                        </td>
+                        <td className="py-1.5 font-mono text-[11px]">
+                          {(ci.poc_urls && ci.poc_urls.length > 0) ? (
+                            <div className="flex flex-col space-y-0.5">
+                              {ci.poc_urls.slice(0, 3).map((u, idx) => (
+                                <a
+                                  key={idx}
+                                  href={u}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-theme-accent hover:underline break-all"
+                                >
+                                  {u}
+                                </a>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-theme-muted">-</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

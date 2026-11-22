@@ -203,6 +203,31 @@ export interface ReconSummary {
     content_length?: number;
     content_type?: string;
   }>;
+  tech_stack?: Array<{
+    name: string;
+    version?: string;
+    category?: string;
+    host?: string;
+    url?: string;
+    port?: number;
+    source?: string;
+    cpe?: string;
+  }>;
+  cve_intel?: Array<{
+    cve_id: string;
+    product: string;
+    version: string;
+    host?: string;
+    url?: string;
+    port?: number;
+    cvss: number;
+    severity: string;
+    is_kev?: boolean;
+    epss?: number | null;
+    published?: string;
+    summary?: string;
+    poc_urls?: string[];
+  }>;
 }
 
 export interface EngineStatus {

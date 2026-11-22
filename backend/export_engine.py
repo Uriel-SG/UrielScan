@@ -529,13 +529,17 @@ def generate_pdf_document(
         or recon_summary.get("dns_zones")
         or recon_summary.get("takeovers")
         or recon_summary.get("directories")
+        or recon_summary.get("tech_stack")
+        or recon_summary.get("cve_intel")
     ):
-        r_title = "Superficie d'Attacco & Web Recon (SubRaptor / httpx / Subzy / Feroxbuster)" if is_it else "Attack Surface & Web Recon Intelligence (SubRaptor / httpx / Subzy / Feroxbuster)"
+        r_title = "Superficie d'Attacco, Stack Tecnologico & CVE/PoC Intel" if is_it else "Attack Surface, Tech Stack & CVE/PoC Intelligence"
         story.append(Paragraph(r_title, h2_style))
         live_subs = recon_summary.get("live_subdomains") or []
         takeovers = recon_summary.get("takeovers") or []
         dirs = recon_summary.get("directories") or []
         dns_zones = recon_summary.get("dns_zones") or []
+        tech_stack = recon_summary.get("tech_stack") or []
+        cve_intel = recon_summary.get("cve_intel") or []
         axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
         story.append(
             Paragraph(
@@ -543,7 +547,9 @@ def generate_pdf_document(
                 f"Live HTTP/S: <b>{len(live_subs)}</b> | "
                 f"Takeovers: <b>{len(takeovers)}</b> | "
                 f"AXFR Open: <b>{axfr_open}</b> | "
-                f"Directories: <b>{len(dirs)}</b>",
+                f"Directories: <b>{len(dirs)}</b> | "
+                f"Tech Stack: <b>{len(tech_stack)}</b> | "
+                f"CVE Intel: <b>{len(cve_intel)}</b>",
                 body_style,
             )
         )
@@ -592,6 +598,55 @@ def generate_pdf_document(
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
             ]))
             story.append(dt)
+            story.append(Spacer(1, 4 * mm))
+        if tech_stack:
+            ts_rows = [["Product", "Version", "Category", "Host / URL", "Source"]]
+            for ts in tech_stack[:35]:
+                ts_rows.append([
+                    Paragraph(_safe_para_text(str(ts.get("name") or "-")), small_muted),
+                    str(ts.get("version") or "-")[:18],
+                    Paragraph(_safe_para_text(str(ts.get("category") or "-")[:24]), small_muted),
+                    Paragraph(_safe_para_text(str(ts.get("url") or ts.get("host") or "-")[:42]), small_muted),
+                    Paragraph(_safe_para_text(str(ts.get("source") or "-")[:22]), small_muted),
+                ])
+            tt = Table(ts_rows, colWidths=[40 * mm, 24 * mm, 32 * mm, 54 * mm, 30 * mm], repeatRows=1)
+            tt.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a5f")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(tt)
+            story.append(Spacer(1, 3 * mm))
+        if cve_intel:
+            ci_rows = [["CVE ID", "Component", "CVSS / KEV", "EPSS", "Public PoC Links"]]
+            for ci in cve_intel[:25]:
+                kev_lbl = f"{ci.get('cvss') or '-'} [KEV]" if ci.get("is_kev") else str(ci.get("cvss") or "-")
+                epss_v = f"{float(ci['epss']) * 100:.2f}%" if isinstance(ci.get("epss"), (int, float)) else "-"
+                pocs = "\n".join(str(u) for u in (ci.get("poc_urls") or [])[:2]) or "-"
+                ci_rows.append([
+                    str(ci.get("cve_id") or "-"),
+                    Paragraph(_safe_para_text(f"{ci.get('product') or ''} {ci.get('version') or ''}".strip()[:35]), small_muted),
+                    kev_lbl,
+                    epss_v,
+                    Paragraph(_safe_para_text(pocs[:110]), small_muted),
+                ])
+            ct = Table(ci_rows, colWidths=[34 * mm, 38 * mm, 26 * mm, 18 * mm, 64 * mm], repeatRows=1)
+            ct.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#7f1d1d")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(ct)
             story.append(Spacer(1, 4 * mm))
 
     # Findings Detail
@@ -873,21 +928,26 @@ def generate_docx_report(
         or recon_summary.get("dns_zones")
         or recon_summary.get("takeovers")
         or recon_summary.get("directories")
+        or recon_summary.get("tech_stack")
+        or recon_summary.get("cve_intel")
     ):
         body_parts.append(heading_xml(
-            "Superficie d'Attacco & Web Recon (SubRaptor / httpx / Subzy / Feroxbuster)"
-            if is_it else "Attack Surface & Web Recon Intelligence (SubRaptor / httpx / Subzy / Feroxbuster)",
+            "Superficie d'Attacco, Stack Tecnologico & CVE/PoC Intel"
+            if is_it else "Attack Surface, Tech Stack & CVE/PoC Intelligence",
             level=2,
         ))
         live_subs = recon_summary.get("live_subdomains") or []
         takeovers = recon_summary.get("takeovers") or []
         dns_zones = recon_summary.get("dns_zones") or []
         dirs = recon_summary.get("directories") or []
+        tech_stack = recon_summary.get("tech_stack") or []
+        cve_intel = recon_summary.get("cve_intel") or []
         axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
         body_parts.append(p_xml(
             f"Subdomains: {int(recon_summary.get('total_subdomains') or 0)} | "
             f"Live HTTP/S: {len(live_subs)} | Takeovers: {len(takeovers)} | "
-            f"AXFR Open: {axfr_open} | Directories: {len(dirs)}",
+            f"AXFR Open: {axfr_open} | Directories: {len(dirs)} | "
+            f"Tech Stack: {len(tech_stack)} | CVE Intel: {len(cve_intel)}",
             bold=True,
         ))
         if live_subs:
@@ -909,6 +969,31 @@ def generate_docx_report(
                     f"{int(d.get('content_length') or 0)} B",
                 ])
             body_parts.append(table_xml(dir_rows))
+        if tech_stack:
+            ts_rows = [["Product", "Version", "Category", "Host / URL", "Source"]]
+            for ts in tech_stack[:35]:
+                ts_rows.append([
+                    str(ts.get("name") or "-"),
+                    str(ts.get("version") or "-"),
+                    str(ts.get("category") or "-"),
+                    str(ts.get("url") or ts.get("host") or "-"),
+                    str(ts.get("source") or "-"),
+                ])
+            body_parts.append(table_xml(ts_rows))
+        if cve_intel:
+            ci_rows = [["CVE ID", "Component", "CVSS / KEV", "EPSS", "Public PoCs"]]
+            for ci in cve_intel[:25]:
+                kev_lbl = f"{ci.get('cvss') or '-'} [CISA KEV]" if ci.get("is_kev") else str(ci.get("cvss") or "-")
+                epss_v = f"{float(ci['epss']) * 100:.2f}%" if isinstance(ci.get("epss"), (int, float)) else "-"
+                pocs = "; ".join(str(u) for u in (ci.get("poc_urls") or [])[:2]) or "-"
+                ci_rows.append([
+                    str(ci.get("cve_id") or "-"),
+                    f"{ci.get('product') or ''} {ci.get('version') or ''}".strip(),
+                    kev_lbl,
+                    epss_v,
+                    pocs,
+                ])
+            body_parts.append(table_xml(ci_rows))
         body_parts.append(p_xml("", space_after=120))
 
     # Section 4: Findings

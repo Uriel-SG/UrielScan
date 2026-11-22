@@ -207,6 +207,12 @@ def init_db() -> None:
         FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE SET NULL,
         FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS cve_intel_cache (
+        cache_key TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
     """)
 
     conn.commit()

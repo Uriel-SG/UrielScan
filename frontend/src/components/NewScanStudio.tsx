@@ -153,6 +153,8 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [dirMaxDepth, setDirMaxDepth] = useState<string>('2');
   const [dirRateLimit, setDirRateLimit] = useState<string>('100');
   const [dirTimeLimit, setDirTimeLimit] = useState<string>('180');
+  const [enableTechFingerprint, setEnableTechFingerprint] = useState<boolean>(true);
+  const [enableCveIntel, setEnableCveIntel] = useState<boolean>(true);
 
   const clampIntStr = (raw: string, min: number, max: number, fallback: number): number => {
     const parsed = parseInt(raw, 10);
@@ -587,6 +589,8 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       dir_max_depth: enableDirEnum ? clampIntStr(dirMaxDepth, 1, 10, 2) : undefined,
       dir_rate_limit: enableDirEnum ? clampIntStr(dirRateLimit, 10, 500, 100) : undefined,
       dir_time_limit: enableDirEnum ? clampIntStr(dirTimeLimit, 30, 600, 180) : undefined,
+      enable_tech_fingerprint: enableTechFingerprint,
+      enable_cve_intel: enableTechFingerprint ? enableCveIntel : false,
       config: {
         ports: portSelection === 'custom' ? customPorts : portSelection,
         nmap_flags: activeFlagsString,
@@ -1652,6 +1656,58 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* Module C: Tech Stack Fingerprinting & CVE / PoC Intel */}
+        <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 pt-1 ${selectedAgentId ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className={`p-3 rounded border transition ${enableTechFingerprint ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel'}`}>
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <div>
+                <div className="text-xs font-bold text-theme-primary">
+                  {L('Tech Stack Fingerprinting (Wappalyzer / httpx + Nmap CPE)', 'Fingerprinting Stack Tecnologico (Wappalyzer / httpx + Nmap CPE)')}
+                </div>
+                <div className="text-[11px] text-theme-secondary mt-0.5">
+                  {L(
+                    'Identifies CMS, frameworks, web servers & backend versions independently from SubRaptor (external & LAN).',
+                    'Rileva CMS, framework, web server e versioni dei servizi anche senza SubRaptor (scansioni esterne e interne).'
+                  )}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableTechFingerprint}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setEnableTechFingerprint(next);
+                  if (!next) setEnableCveIntel(false);
+                }}
+                className="mt-0.5 rounded"
+              />
+            </label>
+          </div>
+
+          <div className={`p-3 rounded border transition ${enableTechFingerprint && enableCveIntel ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel'} ${!enableTechFingerprint ? 'opacity-50 pointer-events-none' : ''}`}>
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <div>
+                <div className="text-xs font-bold text-theme-primary">
+                  {L('CVE, CISA KEV, EPSS & PoC-in-GitHub Intelligence', 'Correlazione CVE recenti, CISA KEV, EPSS & PoC GitHub')}
+                </div>
+                <div className="text-[11px] text-theme-secondary mt-0.5">
+                  {L(
+                    'Correlates detected versions against NVD, CISA KEV active exploits, EPSS scores & public GitHub PoCs (labeled VERSION-BASED).',
+                    'Associa alle versioni rilevate le CVE recenti NVD, flag CISA KEV, EPSS e link PoC GitHub (etichettati VERSION-BASED).'
+                  )}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableTechFingerprint && enableCveIntel}
+                disabled={!enableTechFingerprint}
+                onChange={(e) => setEnableCveIntel(e.target.checked)}
+                className="mt-0.5 rounded"
+              />
+            </label>
           </div>
         </div>
       </div>

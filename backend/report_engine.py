@@ -45,18 +45,22 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
         or recon.get("dns_zones")
         or recon.get("takeovers")
         or recon.get("directories")
+        or recon.get("tech_stack")
+        or recon.get("cve_intel")
     ):
         return ""
 
     sec_title = (
-        "Superficie d'Attacco & Web Recon (SubRaptor / httpx / Subzy / Feroxbuster)"
+        "Superficie d'Attacco, Stack Tecnologico & CVE/PoC Intel"
         if is_it
-        else "Attack Surface & Web Recon Intelligence (SubRaptor / httpx / Subzy / Feroxbuster)"
+        else "Attack Surface, Tech Stack & CVE/PoC Intelligence"
     )
     live_subs = recon.get("live_subdomains") or []
     takeovers = recon.get("takeovers") or []
     dns_zones = recon.get("dns_zones") or []
     dirs = recon.get("directories") or []
+    tech_stack = recon.get("tech_stack") or []
+    cve_intel = recon.get("cve_intel") or []
     axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
     sources = recon.get("sources") or {}
 
@@ -136,6 +140,56 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
         else ""
     )
 
+    tech_rows = ""
+    for ts in tech_stack[:40]:
+        ver_str = _esc(ts.get("version") or "-")
+        host_url = _esc(ts.get("url") or ts.get("host") or "-")
+        tech_rows += (
+            f"<tr>"
+            f"<td><strong>{_esc(ts.get('name') or '-')}</strong></td>"
+            f"<td><code>{ver_str}</code></td>"
+            f"<td>{_esc(ts.get('category') or '-')}</td>"
+            f"<td><code>{host_url}</code></td>"
+            f"<td>{_esc(ts.get('source') or '-')}</td>"
+            f"</tr>"
+        )
+    tech_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("Stack Tecnologico Rilevato (Wappalyzer / httpx / Nmap)" if is_it else "Detected Technology Stack (Wappalyzer / httpx / Nmap)")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>Product</th><th>Version</th><th>Category</th><th>Host / URL</th><th>Source</th>"
+        + f"</tr></thead><tbody>{tech_rows}</tbody></table>"
+        if tech_rows
+        else ""
+    )
+
+    cve_rows = ""
+    for ci in cve_intel[:30]:
+        kev_badge = "<span style='color:#dc2626;font-weight:bold;'>CISA KEV</span> " if ci.get("is_kev") else ""
+        epss_v = f"{float(ci['epss']) * 100:.2f}%" if isinstance(ci.get("epss"), (int, float)) else "-"
+        pocs_html = "<br/>".join(
+            f"<a href='{_esc(u)}' target='_blank' rel='noopener noreferrer'><code>{_esc(u)}</code></a>"
+            for u in (ci.get("poc_urls") or [])[:3]
+        ) or "-"
+        cve_rows += (
+            f"<tr>"
+            f"<td><code>{_esc(ci.get('cve_id') or '-')}</code></td>"
+            f"<td><strong>{_esc(ci.get('product') or '-')}</strong> {_esc(ci.get('version') or '')}</td>"
+            f"<td><strong>{_esc(ci.get('cvss') or '-')}</strong></td>"
+            f"<td>{kev_badge}{epss_v}</td>"
+            f"<td>{pocs_html}</td>"
+            f"</tr>"
+        )
+    cve_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("CVE &amp; PoC Intelligence (NVD / CISA KEV / EPSS)" if is_it else "CVE &amp; PoC Intelligence (NVD / CISA KEV / EPSS)")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>CVE</th><th>Component</th><th>CVSS</th><th>EPSS / KEV</th><th>Public PoCs</th>"
+        + f"</tr></thead><tbody>{cve_rows}</tbody></table>"
+        if cve_rows
+        else ""
+    )
+
     return f"""
         <h2 class="section-title page-break-before">{_esc(sec_title)}</h2>
         <div class="exec-card" style="margin-bottom:16px;">
@@ -145,11 +199,15 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
                 <span><strong>Takeovers (Subzy):</strong> {len(takeovers)}</span>
                 <span><strong>AXFR Open:</strong> {axfr_open}</span>
                 <span><strong>Directories (Feroxbuster):</strong> {len(dirs)}</span>
+                <span><strong>Tech Stack:</strong> {len(tech_stack)}</span>
+                <span><strong>CVE Intel:</strong> {len(cve_intel)}</span>
             </div>
             {src_badges}
         </div>
         {dns_table}
         {sub_table}
+        {tech_table}
+        {cve_table}
         {dir_table}
     """
 

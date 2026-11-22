@@ -1115,6 +1115,11 @@ def parse_nmap_xml(xml_data: str, log_callback: Optional[Callable[[str, str], An
                 product = svc_el.get("product", "") if svc_el is not None else ""
                 version = svc_el.get("version", "") if svc_el is not None else ""
                 extrainfo = svc_el.get("extrainfo", "") if svc_el is not None else ""
+                cpes = [
+                    c.text.strip()
+                    for c in svc_el.findall("cpe")
+                    if c.text and c.text.strip()
+                ] if svc_el is not None else []
 
                 full_prod = f"{product} {version}".strip()
                 if extrainfo:
@@ -1125,7 +1130,9 @@ def parse_nmap_xml(xml_data: str, log_callback: Optional[Callable[[str, str], An
                     "protocol": proto,
                     "service": svc_name,
                     "product": full_prod or svc_name,
+                    "product_name": product,
                     "version": version,
+                    "cpe": cpes,
                     "state": pstate
                 })
 

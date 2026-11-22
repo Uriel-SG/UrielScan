@@ -1654,3 +1654,223 @@ def test_web_recon_subraptor_takeover_feroxbuster_and_wordlists(tmp_path, monkey
     docx_bytes = generate_docx_report("Recon DOCX", "CONFIDENTIAL", {}, {"name": "Client"}, "example.com", [], dir_findings, recon_summary=recon_payload)
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
         assert "sub.example.com" in zf.read("word/document.xml").decode("utf-8")
+
+
+def test_tech_stack_fingerprinting_and_cve_poc_intel(monkeypatch):
+    import asyncio
+    import io
+    import json
+    import zipfile
+    import backend.main as main_mod
+    from backend.database import get_db_connection
+    from backend.scanners import tech_cve_engine
+    from backend.scanners.deduplicator import consolidate_findings
+    from backend.report_engine import generate_html_report
+    from backend.export_engine import generate_pdf_document, generate_docx_report
+
+    # 1. Mock httpx probe + HTML/header fetch + Nmap CPE fusion
+    async def _fake_httpx_probe(urls, proxy_url=None, log_callback=None):
+        return [{
+            "subdomain": "portal.example.org",
+            "url": "https://portal.example.org",
+            "status_code": 200,
+            "title": "Portal",
+            "tech": ["WordPress:6.4.2", "Nginx:1.24.0"],
+            "webserver": "nginx/1.24.0",
+            "ip": "93.184.216.34",
+            "cname": [],
+            "content_length": 1024,
+        }]
+
+    monkeypatch.setattr(tech_cve_engine, "run_httpx_probe", _fake_httpx_probe)
+
+    class _FakeResp:
+        def __init__(self, status_code, headers=None, text="", json_data=None, url="https://portal.example.org"):
+            self.status_code = status_code
+            self.headers = headers or {}
+            self.text = text
+            self._json = json_data
+            self.url = url
+
+        def json(self):
+            return self._json
+
+    class _FakeTechClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            return _FakeResp(
+                200,
+                headers={
+                    "Server": "nginx/1.24.0",
+                    "X-Powered-By": "PHP/8.1.2",
+                    "Set-Cookie": "laravel_session=abc; HttpOnly",
+                },
+                text='<html><head><meta name="generator" content="WordPress 6.4.2">'
+                     '<script src="/assets/jquery-3.5.1.min.js"></script></head></html>',
+                url=url,
+            )
+
+    monkeypatch.setattr(tech_cve_engine.httpx, "AsyncClient", _FakeTechClient)
+
+    hosts_dict = {
+        "93.184.216.34": {
+            "ip": "93.184.216.34",
+            "hostname": "portal.example.org",
+            "ports": [{
+                "port": 22,
+                "protocol": "tcp",
+                "service": "ssh",
+                "product": "OpenSSH 8.9p1",
+                "product_name": "OpenSSH",
+                "version": "8.9p1",
+                "cpe": ["cpe:/a:openbsd:openssh:8.9p1"],
+                "state": "open",
+            }],
+        }
+    }
+
+    stack = asyncio.run(tech_cve_engine.run_tech_fingerprint(
+        urls=["https://portal.example.org"],
+        hosts_dict=hosts_dict,
+    ))
+    by_name = {s["name"].lower(): s for s in stack}
+    assert "wordpress" in by_name and by_name["wordpress"]["version"] == "6.4.2"
+    assert "nginx" in by_name and by_name["nginx"]["version"] == "1.24.0"
+    assert "php" in by_name and by_name["php"]["version"] == "8.1.2"
+    assert "jquery" in by_name and by_name["jquery"]["version"] == "3.5.1"
+    assert "laravel" in by_name
+    assert "openssh" in by_name and by_name["openssh"]["cpe"].startswith("cpe:2.3:a:openbsd:openssh:8.9p1:")
+
+    # 2. CVE + CISA KEV + EPSS + PoC-in-GitHub correlation & SQLite caching
+    http_calls = []
+
+    class _FakeIntelClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kw):
+            http_calls.append(url)
+            if "known_exploited_vulnerabilities.json" in url:
+                return _FakeResp(200, json_data={
+                    "vulnerabilities": [{
+                        "cveID": "CVE-2024-99999",
+                        "dueDate": "2026-05-01",
+                        "knownRansomwareCampaignUse": "Known",
+                        "vulnerabilityName": "Example Critical RCE",
+                    }]
+                })
+            if "services.nvd.nist.gov" in url:
+                return _FakeResp(200, json_data={
+                    "vulnerabilities": [{
+                        "cve": {
+                            "id": "CVE-2024-99999",
+                            "published": "2026-01-15T10:00:00.000",
+                            "descriptions": [{"lang": "en", "value": "Critical RCE in component"}],
+                            "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 9.8}}]},
+                        }
+                    }]
+                })
+            if "api.first.org" in url:
+                return _FakeResp(200, json_data={"data": [{"cve": "CVE-2024-99999", "epss": "0.8732"}]})
+            if "PoC-in-GitHub" in url:
+                return _FakeResp(200, json_data=[{"html_url": "https://github.com/example/CVE-2024-99999-poc"}])
+            return _FakeResp(404)
+
+    monkeypatch.setattr(tech_cve_engine.httpx, "AsyncClient", _FakeIntelClient)
+
+    # Clear test cache keys beforehand to exercise network path then cache path
+    conn = get_db_connection()
+    with conn:
+        conn.execute("DELETE FROM cve_intel_cache;")
+    conn.close()
+
+    matches, intel_findings = asyncio.run(tech_cve_engine.run_cve_intel_correlation(stack[:1]))
+    assert len(matches) >= 1
+    assert matches[0]["cve_id"] == "CVE-2024-99999"
+    assert matches[0]["is_kev"] is True
+    assert matches[0]["epss"] == 0.8732
+    assert "https://github.com/example/CVE-2024-99999-poc" in matches[0]["poc_urls"]
+    assert any(
+        f["source_engine"] == "cve_intel"
+        and "[CISA KEV]" in f["title"]
+        and "VERSION-BASED" in f["evidence"]
+        for f in intel_findings
+    )
+    first_call_count = len(http_calls)
+    assert first_call_count >= 4
+
+    # Second run must hit SQLite cve_intel_cache without external HTTP requests
+    matches2, _ = asyncio.run(tech_cve_engine.run_cve_intel_correlation(stack[:1]))
+    assert len(matches2) == len(matches)
+    assert len(http_calls) == first_call_count
+
+    # 3. Cross-engine deduplication: active Nuclei beats version-based cve_intel for same host & CVE
+    nuclei_finding = {
+        "host": intel_findings[0]["host"],
+        "port": intel_findings[0]["port"],
+        "protocol": "tcp",
+        "service": "https",
+        "title": "Confirmed Nuclei RCE",
+        "severity": "critical",
+        "cvss": 9.8,
+        "cve_ids": "CVE-2024-99999",
+        "cwe_id": "CWE-94",
+        "source_engine": "nuclei",
+        "description": "Verified via active template",
+        "evidence": "HTTP 200 poc match",
+        "remediation": "Upgrade now",
+    }
+    consolidated = consolidate_findings([nuclei_finding, intel_findings[0]])
+    matching_99999 = [f for f in consolidated if "CVE-2024-99999" in (f.get("cve_ids") or "")]
+    assert len(matching_99999) == 1
+    assert matching_99999[0]["source_engine"] == "nuclei+cve_intel"
+    assert matching_99999[0]["title"] == "Confirmed Nuclei RCE"
+
+    # 4. POST /api/scans persists enable_tech_fingerprint & enable_cve_intel
+    monkeypatch.setattr(main_mod, "start_scan_in_background", lambda scan_id: None)
+    tech_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Tech & CVE Intel Scan",
+        "targets": "https://portal.example.org",
+        "engines": ["native_web"],
+        "enable_tech_fingerprint": True,
+        "enable_cve_intel": False,
+    }).json()
+    assert tech_scan["config"]["enable_tech_fingerprint"] is True
+    assert tech_scan["config"]["enable_cve_intel"] is False
+
+    # 5. HTML, PDF & DOCX render tech_stack and cve_intel tables (including CISA KEV & PoC URL)
+    recon_payload = {"tech_stack": stack, "cve_intel": matches}
+    conn = get_db_connection()
+    with conn:
+        conn.execute(
+            "UPDATE scans SET status='completed', summary_json=? WHERE id=?;",
+            (json.dumps({"total_hosts": 1, "total_findings": len(intel_findings), "risk_score": 75, "recon": recon_payload}), int(tech_scan["id"])),
+        )
+    conn.close()
+
+    html_rep = generate_html_report(int(tech_scan["id"]), lang="en")
+    html_body = open(html_rep["file_path"], encoding="utf-8").read()
+    assert "WordPress" in html_body and "CISA KEV" in html_body and "CVE-2024-99999-poc" in html_body
+
+    pdf_bytes = generate_pdf_document("Tech PDF", "CONFIDENTIAL", {}, {"name": "Client"}, "portal.example.org", [], intel_findings, recon_summary=recon_payload)
+    assert pdf_bytes.startswith(b"%PDF") and len(pdf_bytes) > 5000
+
+    docx_bytes = generate_docx_report("Tech DOCX", "CONFIDENTIAL", {}, {"name": "Client"}, "portal.example.org", [], intel_findings, recon_summary=recon_payload)
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "WordPress" in doc_xml and "CISA KEV" in doc_xml and "CVE-2024-99999-poc" in doc_xml
