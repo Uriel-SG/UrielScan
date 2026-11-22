@@ -70,6 +70,29 @@ Disabled by default and selectable per-scan in **New Scan Studio**:
 - **Purple Team AI Analyst**: Supports **Google Gemini**, **OpenAI**, **Anthropic Claude**, **Ollama (Local)**, and a built-in **Offline Heuristic Engine**, with persistent Saved AI Analyses history and executive/single-finding insights.
 - **Authentication**: Admin login (`admin:admin` on first boot) with optional **2FA TOTP (RFC 6238)** QR setup and password management.
 
+*Example - Report:*
+
+<img width="882" height="1107" alt="image" src="https://github.com/user-attachments/assets/fedf1921-de14-4972-a985-0c2f0aa79751" />
+
+*Example - AI configuration:*
+
+<img width="988" height="752" alt="image" src="https://github.com/user-attachments/assets/0a84a2fd-034b-42ac-9482-a3d0a72a20aa" />
+
+*Example - AI analysis:*
+
+<img width="1585" height="307" alt="image" src="https://github.com/user-attachments/assets/cee4cb46-eda2-4b65-9954-dbcf1bf3988a" />
+
+<img width="1556" height="450" alt="image" src="https://github.com/user-attachments/assets/3b6f5ede-78d6-4030-b49b-22da6871b36c" />
+
+<img width="1556" height="766" alt="image" src="https://github.com/user-attachments/assets/0248b680-9286-4319-8515-5f79e5949e42" />
+
+<img width="1572" height="756" alt="image" src="https://github.com/user-attachments/assets/497edf24-82bc-468f-9b79-e1f4701edc01" />
+
+*Example - AI html Report:*
+
+<img width="867" height="777" alt="image" src="https://github.com/user-attachments/assets/bbcb2293-18bd-4d2e-adc6-54ef8aae59a9" />
+
+
 ## Core Architecture
 - **Backend & Scanners (`backend/`)**:
   - [`backend/main.py`](backend/main.py): FastAPI server, SPA mount, REST API, Auth/2FA TOTP, Tor/Proxy controls, and Remote Probe endpoints.
