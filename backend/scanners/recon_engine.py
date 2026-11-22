@@ -433,6 +433,7 @@ async def _run_subfinder_source(domain: str, proxy_url: Optional[str]) -> Tuple[
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -457,6 +458,7 @@ async def _run_assetfinder_source(domain: str, proxy_url: Optional[str]) -> Tupl
     try:
         proc = await asyncio.create_subprocess_exec(
             af_bin, "--subs-only", domain,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -720,6 +722,7 @@ async def run_httpx_probe(
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -743,7 +746,7 @@ async def run_httpx_probe(
                             "title": str(obj.get("title") or "")[:140],
                             "tech": [str(t) for t in (obj.get("tech") or [])][:10],
                             "webserver": str(obj.get("webserver") or "")[:80],
-                            "ip": str(obj.get("host") or obj.get("ip") or ""),
+                            "ip": str(obj.get("host_ip") or obj.get("host") or obj.get("ip") or ""),
                             "cname": [str(c).rstrip(".") for c in (obj.get("cname") or [])] if isinstance(obj.get("cname"), list) else ([str(obj["cname"]).rstrip(".")] if obj.get("cname") else []),
                             "content_length": int(obj.get("content_length") or obj.get("content-length") or 0),
                         })
@@ -772,9 +775,10 @@ async def run_httpx_probe(
     ) as client:
         async def _probe_sub(sub: str) -> Optional[Dict[str, Any]]:
             async with sem:
-                for scheme in ("https", "http"):
+                candidate_urls = [sub] if sub.startswith(("http://", "https://")) else [f"https://{sub}", f"http://{sub}"]
+                for target_url in candidate_urls:
                     try:
-                        resp = await client.get(f"{scheme}://{sub}", headers={"User-Agent": "UrielScan-LiveProbe/1.0"})
+                        resp = await client.get(target_url, headers={"User-Agent": "UrielScan-LiveProbe/1.0"})
                         title_m = title_re.search(resp.text[:8000] if resp.text else "")
                         title = re.sub(r"\s+", " ", title_m.group(1)).strip()[:140] if title_m else ""
                         srv = resp.headers.get("server", "")
@@ -1270,8 +1274,8 @@ async def run_feroxbuster_scan(
             "--wordlist", str(wpath),
             "--json",
             "--silent",
+            "--no-state",
             "--auto-tune",
-            "--auto-bail",
             "--insecure",
             "--threads", "25",
             "--rate-limit", str(safe_rl),
@@ -1293,15 +1297,21 @@ async def run_feroxbuster_scan(
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=float(safe_tl) + 30.0)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=float(safe_tl) + 30.0)
             except asyncio.TimeoutError:
                 proc.kill()
-                stdout, _ = await proc.communicate()
+                stdout, stderr = await proc.communicate()
                 log("WARN", f"[Feroxbuster] Timeout su {u}: raccolti risultati parziali.")
+
+            if proc.returncode not in (0, None):
+                err_txt = stderr.decode("utf-8", errors="replace").strip()
+                if err_txt:
+                    log("WARN", f"[Feroxbuster] Exit code {proc.returncode} su {u}: {err_txt[:300]}")
 
             parsed = parse_feroxbuster_jsonl(stdout.decode("utf-8", errors="replace"))
             log("INFO", f"[Feroxbuster] {u}: rilevati {len(parsed)} percorsi validi.")
