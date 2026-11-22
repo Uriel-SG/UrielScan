@@ -4,6 +4,8 @@
 
 **UrielScan** is an open-source Vulnerability Assessment & Purple Team platform designed to combine **Network Scanning (Nmap + NSE)**, **Web Vulnerability Scanning (Nuclei + OWASP ZAP)**, and an **Asynchronous Native Engine** with cross-engine deduplication, **Tor Onion / Custom SOCKS5-HTTP Proxy routing**, **NAT Loopback Guard**, **Self-Contained Remote Probe Installers (`.msi` / `.sh`)**, bilingual `EN / IT` multi-theme UI, and white-label dual-logo reporting for **MSP/MSSP** operations.
 
+<img width="1917" height="1198" alt="Screenshot 2026-11-22 154719" src="https://github.com/user-attachments/assets/3493d065-cadc-4199-821b-1ae4c5159eac" />
+
 ## Quick Start (Windows & Linux)
 
 ### 1. First-Time Setup (Python `.venv` + All Engines: Nmap, Nuclei, OWASP ZAP + JRE 17, Tor)
