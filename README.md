@@ -90,7 +90,7 @@ Disabled by default and selectable per-scan in **New Scan Studio**:
 
 ## UrielScan Engines
 
-<img width="1915" height="1198" alt="Screenshot 2026-11-22 154733" src="https://github.com/user-attachments/assets/bfafa7a2-6066-4799-a5e9-9a08639a2d32" />
+<img width="1125" height="680" alt="image" src="https://github.com/user-attachments/assets/6ed2641d-dc8a-42ab-9b4a-3201bfe68aff" />
 
 ## Different Themes
 
