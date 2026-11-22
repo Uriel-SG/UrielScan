@@ -57,7 +57,9 @@ In **New Scan Studio → Outbound Network Routing** (local scans), choose betwee
 
 Disabled by default and selectable per-scan in **New Scan Studio**:
 - **Subdomain Discovery & Intelligence**: Combines **SubRaptor**-style passive aggregation (**Subfinder**, **Assetfinder**, **crt.sh** with per-source Found/Unique attribution), optional DNS bruteforce via SecLists (`n0kovo_subdomains.txt`, `subdomains-top1million-110000.txt`, `italian-subdomains.txt`) or custom `.txt` upload, **DNS Zone Audit** (AXFR transfer test, Wildcard check, SPF/DMARC/CAA), live web/tech probing (**ProjectDiscovery `httpx`**), and **Subdomain Takeover** checks (**Subzy** / `can-i-take-over-xyz` 76-signature DB), with optional cascade into Web/Nuclei/ZAP/Feroxbuster.
-- **Directory Enumeration (`Feroxbuster`)**: High-speed wildcard-filtered content discovery with SecLists (`DirBuster-2007_directory-list-2.3-medium.txt` / `big.txt`) or custom `.txt` upload, rate/time limits, and proxy/Tor support.
+- **Directory Enumeration (`Feroxbuster`)**: High-speed wildcard-filtered content discovery with SecLists (`DirBuster-2007_directory-list-2.3-medium.txt` / `big.txt`) or custom `.txt` upload, configurable rate/time/max-depth limits, and proxy/Tor support.
+- **Standalone Tech Stack Fingerprinting (`Wappalyzer / httpx + HTML/Headers + Nmap CPE`)**: Runs independently of SubRaptor on both external and internal/LAN targets, combining `httpx -tech-detect`, HTTP header/HTML/cookie version extraction, and Nmap `<cpe>` fusion into a unified Technology Stack inventory in UI and HTML/PDF/DOCX reports.
+- **CVE, CISA KEV, EPSS & PoC-in-GitHub Intelligence**: Correlates versioned components against **NVD API v2**, **CISA KEV**, **FIRST EPSS**, and **PoC-in-GitHub** with a 24h local SQLite cache (`cve_intel_cache`), attaching public PoC URLs and transparent `VERSION-BASED` labeling (deduplicated below active Nuclei/ZAP findings).
 
 <img width="1916" height="1198" alt="image" src="https://github.com/user-attachments/assets/5646b324-d4e1-40f0-8c83-340d08cc016a" />
 
@@ -106,6 +108,7 @@ Disabled by default and selectable per-scan in **New Scan Studio**:
   - [`backend/scanners/tor_engine.py`](backend/scanners/tor_engine.py): Managed Tor Expert Bundle lifecycle, RFC 1928 SOCKS5 / HTTP CONNECT tunneling, Exit IP probe, and circuit rotation.
   - [`backend/scanners/engine_bootstrap.py`](backend/scanners/engine_bootstrap.py): Automatic startup & CLI provisioning for Nmap, Nuclei, OWASP ZAP, and Tor (`bin/`).
   - [`backend/scanners/native_engine.py`](backend/scanners/native_engine.py): Asynchronous TCP/Banner scanner, SSL/TLS Inspector, and OWASP Web Security Analyzer (with SOCKS5h/HTTP proxy support).
+  - [`backend/scanners/recon_engine.py`](backend/scanners/recon_engine.py), [`backend/scanners/wordlists.py`](backend/scanners/wordlists.py) & [`backend/scanners/tech_cve_engine.py`](backend/scanners/tech_cve_engine.py): SubRaptor, `httpx`, Subzy, Feroxbuster, standalone Wappalyzer/CPE Tech Fingerprinting, and NVD/CISA KEV/EPSS/PoC-in-GitHub correlation.
   - [`backend/scanners/nat_guard.py`](backend/scanners/nat_guard.py) & [`backend/scanners/deduplicator.py`](backend/scanners/deduplicator.py): WAN hairpin detection and cross-engine finding deduplication.
   - [`backend/ai_engine.py`](backend/ai_engine.py), [`backend/report_engine.py`](backend/report_engine.py), [`backend/export_engine.py`](backend/export_engine.py) & [`backend/scheduler.py`](backend/scheduler.py): Multi-LLM analyst, white-label HTML/DOCX/PDF/CSV/TXT generators, and cron/interval scan scheduler.
 - **Standalone Remote Agent (`agent/`)**:
