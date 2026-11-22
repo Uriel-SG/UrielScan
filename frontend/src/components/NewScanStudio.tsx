@@ -144,14 +144,21 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [subdomainWordlist, setSubdomainWordlist] = useState<string>('n0kovo');
   const [subdomainChecks, setSubdomainChecks] = useState<string[]>(['httpx', 'takeover', 'dns_zone']);
   const [cascadeSubdomains, setCascadeSubdomains] = useState<boolean>(true);
-  const [cascadeLimit, setCascadeLimit] = useState<number>(20);
+  const [cascadeLimit, setCascadeLimit] = useState<string>('20');
 
   const [enableDirEnum, setEnableDirEnum] = useState<boolean>(false);
   const [dirWordlist, setDirWordlist] = useState<string>('dirbuster_medium');
   const [dirExtensions, setDirExtensions] = useState<string>('');
   const [dirRecursion, setDirRecursion] = useState<boolean>(false);
-  const [dirRateLimit, setDirRateLimit] = useState<number>(100);
-  const [dirTimeLimit, setDirTimeLimit] = useState<number>(180);
+  const [dirMaxDepth, setDirMaxDepth] = useState<string>('2');
+  const [dirRateLimit, setDirRateLimit] = useState<string>('100');
+  const [dirTimeLimit, setDirTimeLimit] = useState<string>('180');
+
+  const clampIntStr = (raw: string, min: number, max: number, fallback: number): number => {
+    const parsed = parseInt(raw, 10);
+    if (Number.isNaN(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+  };
 
   const [wordlistsData, setWordlistsData] = useState<{ dns: WordlistItem[]; web: WordlistItem[] }>({ dns: [], web: [] });
   const [uploadingCategory, setUploadingCategory] = useState<'dns' | 'web' | null>(null);
@@ -572,13 +579,14 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       subdomain_wordlist: enableSubdomainEnum ? subdomainWordlist : undefined,
       subdomain_checks: enableSubdomainEnum ? subdomainChecks : undefined,
       cascade_subdomains: enableSubdomainEnum ? cascadeSubdomains : undefined,
-      cascade_limit: enableSubdomainEnum ? cascadeLimit : undefined,
+      cascade_limit: enableSubdomainEnum ? clampIntStr(cascadeLimit, 1, 50, 20) : undefined,
       enable_dir_enum: enableDirEnum,
       dir_wordlist: enableDirEnum ? dirWordlist : undefined,
       dir_extensions: enableDirEnum ? dirExtensions.trim() : undefined,
       dir_recursion: enableDirEnum ? dirRecursion : undefined,
-      dir_rate_limit: enableDirEnum ? dirRateLimit : undefined,
-      dir_time_limit: enableDirEnum ? dirTimeLimit : undefined,
+      dir_max_depth: enableDirEnum ? clampIntStr(dirMaxDepth, 1, 10, 2) : undefined,
+      dir_rate_limit: enableDirEnum ? clampIntStr(dirRateLimit, 10, 500, 100) : undefined,
+      dir_time_limit: enableDirEnum ? clampIntStr(dirTimeLimit, 30, 600, 180) : undefined,
       config: {
         ports: portSelection === 'custom' ? customPorts : portSelection,
         nmap_flags: activeFlagsString,
@@ -1465,14 +1473,22 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
                     <span>{L('Pass live subdomains to Web/Nuclei/ZAP/Feroxbuster', 'Passa sottodomini vivi ai motori Web/Nuclei/ZAP/Feroxbuster')}</span>
                   </label>
                   {cascadeSubdomains && (
-                    <div className="flex items-center space-x-1.5 text-[11px] font-mono">
-                      <span className="text-theme-muted">{L('Max hosts:', 'Max host:')}</span>
+                    <div
+                      className="flex items-center space-x-1.5 text-[11px] font-mono"
+                      title={L(
+                        'Maximum number of live subdomains forwarded to Web, Nuclei, ZAP and Feroxbuster',
+                        'Numero massimo di sottodomini vivi passati a Web, Nuclei, ZAP e Feroxbuster'
+                      )}
+                    >
+                      <span className="text-theme-muted">{L('Max live hosts:', 'Max host vivi:')}</span>
                       <input
-                        type="number"
-                        min={1}
-                        max={50}
+                        type="text"
+                        inputMode="numeric"
                         value={cascadeLimit}
-                        onChange={(e) => setCascadeLimit(Math.max(1, Math.min(50, Number(e.target.value) || 20)))}
+                        onChange={(e) => {
+                          if (/^\d*$/.test(e.target.value)) setCascadeLimit(e.target.value);
+                        }}
+                        onBlur={() => setCascadeLimit(String(clampIntStr(cascadeLimit, 1, 50, 20)))}
                         className="input-industrial w-14 px-2 py-0.5 text-xs text-center"
                       />
                     </div>
@@ -1579,11 +1595,14 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
                       {L('Rate Limit (req/s)', 'Rate Limit (req/s)')}
                     </label>
                     <input
-                      type="number"
-                      min={10}
-                      max={500}
+                      type="text"
+                      inputMode="numeric"
                       value={dirRateLimit}
-                      onChange={(e) => setDirRateLimit(Math.max(10, Math.min(500, Number(e.target.value) || 100)))}
+                      onChange={(e) => {
+                        if (/^\d*$/.test(e.target.value)) setDirRateLimit(e.target.value);
+                      }}
+                      onBlur={() => setDirRateLimit(String(clampIntStr(dirRateLimit, 10, 500, 100)))}
+                      placeholder="100"
                       className="input-industrial w-full px-2.5 py-1 text-xs font-mono"
                     />
                   </div>
@@ -1592,25 +1611,45 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
                       {L('Time Limit (sec)', 'Limite Tempo (sec)')}
                     </label>
                     <input
-                      type="number"
-                      min={30}
-                      max={600}
+                      type="text"
+                      inputMode="numeric"
                       value={dirTimeLimit}
-                      onChange={(e) => setDirTimeLimit(Math.max(30, Math.min(600, Number(e.target.value) || 180)))}
+                      onChange={(e) => {
+                        if (/^\d*$/.test(e.target.value)) setDirTimeLimit(e.target.value);
+                      }}
+                      onBlur={() => setDirTimeLimit(String(clampIntStr(dirTimeLimit, 30, 600, 180)))}
+                      placeholder="180"
                       className="input-industrial w-full px-2.5 py-1 text-xs font-mono"
                     />
                   </div>
                 </div>
 
-                <label className="flex items-center space-x-2 text-[11px] text-theme-secondary cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={dirRecursion}
-                    onChange={(e) => setDirRecursion(e.target.checked)}
-                    className="rounded"
-                  />
-                  <span>{L('Enable recursive scanning (max depth 2 — slower)', 'Abilita scansione ricorsiva (profondità max 2 — più lenta)')}</span>
-                </label>
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                  <label className="flex items-center space-x-2 text-[11px] text-theme-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={dirRecursion}
+                      onChange={(e) => setDirRecursion(e.target.checked)}
+                      className="rounded"
+                    />
+                    <span>{L('Enable recursive scanning (slower)', 'Abilita scansione ricorsiva (più lenta)')}</span>
+                  </label>
+                  <div className="flex items-center space-x-1.5 text-[11px] font-mono">
+                    <span className="text-theme-muted">{L('Max Depth:', 'Profondità Max:')}</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={dirMaxDepth}
+                      disabled={!dirRecursion}
+                      onChange={(e) => {
+                        if (/^\d*$/.test(e.target.value)) setDirMaxDepth(e.target.value);
+                      }}
+                      onBlur={() => setDirMaxDepth(String(clampIntStr(dirMaxDepth, 1, 10, 2)))}
+                      placeholder="2"
+                      className={`input-industrial w-14 px-2 py-0.5 text-xs text-center ${!dirRecursion ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    />
+                  </div>
+                </div>
               </div>
             )}
           </div>

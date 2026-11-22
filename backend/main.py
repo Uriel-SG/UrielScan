@@ -250,6 +250,7 @@ class ScanCreateModel(BaseModel):
     dir_wordlist: Optional[str] = "dirbuster_medium"
     dir_extensions: Optional[str] = ""
     dir_recursion: Optional[bool] = False
+    dir_max_depth: Optional[int] = 2
     dir_rate_limit: Optional[int] = 100
     dir_time_limit: Optional[int] = 180
 
@@ -967,6 +968,8 @@ async def create_and_start_scan(payload: ScanCreateModel):
         cfg["dir_extensions"] = payload.dir_extensions
     if payload.dir_recursion is not None:
         cfg["dir_recursion"] = bool(payload.dir_recursion)
+    if payload.dir_max_depth is not None:
+        cfg["dir_max_depth"] = max(1, min(int(payload.dir_max_depth), 10))
     if payload.dir_rate_limit is not None:
         cfg["dir_rate_limit"] = max(10, min(int(payload.dir_rate_limit), 500))
     if payload.dir_time_limit is not None:

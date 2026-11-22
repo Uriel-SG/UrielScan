@@ -476,6 +476,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
                     wordlist_id=config.get("dir_wordlist", "dirbuster_medium"),
                     extensions=config.get("dir_extensions"),
                     recursion=bool(config.get("dir_recursion", False)),
+                    max_depth=int(config.get("dir_max_depth", 2) or 2),
                     rate_limit=int(config.get("dir_rate_limit", 100) or 100),
                     time_limit=int(config.get("dir_time_limit", 180) or 180),
                     proxy_url=active_proxy_url,

@@ -1610,11 +1610,25 @@ def test_web_recon_subraptor_takeover_feroxbuster_and_wordlists(tmp_path, monkey
         "subdomain_checks": ["httpx", "takeover"],
         "enable_dir_enum": True,
         "dir_wordlist": "dirbuster_big",
+        "dir_recursion": True,
+        "dir_max_depth": 5,
     }).json()
     assert recon_scan["config"]["enable_subdomain_enum"] is True
     assert recon_scan["config"]["subdomain_wordlist"] == "italian"
     assert recon_scan["config"]["enable_dir_enum"] is True
     assert recon_scan["config"]["dir_wordlist"] == "dirbuster_big"
+    assert recon_scan["config"]["dir_recursion"] is True
+    assert recon_scan["config"]["dir_max_depth"] == 5
+
+    clamped_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Clamped Depth Check",
+        "targets": "example.com",
+        "engines": ["native_web"],
+        "enable_dir_enum": True,
+        "dir_max_depth": 99,
+    }).json()
+    assert clamped_scan["config"]["dir_max_depth"] == 10
 
     # 6. HTML / PDF / DOCX reports render Attack Surface & Recon summary cleanly
     recon_payload = {

@@ -29,9 +29,9 @@ interface NavbarProps {
 }
 
 const THEME_OPTIONS: Array<{ id: PortalTheme; label: string; swatch: string }> = [
-  { id: 'uriel-ops', label: 'Uriel Ops', swatch: 'bg-violet-500' },
+  { id: 'uriel-ops', label: 'Uriel Ops', swatch: 'bg-blue-500' },
   { id: 'phosphor-ops', label: 'Phosphor Ops', swatch: 'bg-emerald-400' },
-  { id: 'foundry-dark', label: 'Carbon Tactical', swatch: 'bg-sky-500' },
+  { id: 'foundry-dark', label: 'Carbon Tactical', swatch: 'bg-gradient-to-br from-orange-500 to-red-600' },
   { id: 'swiss-light', label: 'Swiss Editorial', swatch: 'bg-zinc-200 border border-zinc-400' },
 ];
 

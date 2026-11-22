@@ -807,6 +807,7 @@ export const api = {
     dir_wordlist?: string;
     dir_extensions?: string;
     dir_recursion?: boolean;
+    dir_max_depth?: number;
     dir_rate_limit?: number;
     dir_time_limit?: number;
   }): Promise<Scan> {

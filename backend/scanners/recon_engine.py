@@ -1224,6 +1224,7 @@ async def run_feroxbuster_scan(
     wordlist_id: Optional[str] = "dirbuster_medium",
     extensions: Optional[str] = None,
     recursion: bool = False,
+    max_depth: int = 2,
     rate_limit: int = 100,
     time_limit: int = 180,
     proxy_url: Optional[str] = None,
@@ -1253,6 +1254,7 @@ async def run_feroxbuster_scan(
 
     safe_rl = max(10, min(int(rate_limit or 100), 500))
     safe_tl = max(30, min(int(time_limit or 180), 600))
+    safe_depth = max(1, min(int(max_depth or 2), 10))
     clean_ext = ""
     if extensions and _EXT_CLEAN_RE.match(extensions.strip()):
         clean_ext = extensions.strip()
@@ -1276,7 +1278,7 @@ async def run_feroxbuster_scan(
             "--time-limit", f"{safe_tl}s",
         ]
         if recursion:
-            args.extend(["--depth", "2"])
+            args.extend(["--depth", str(safe_depth)])
         else:
             args.append("--no-recursion")
 
