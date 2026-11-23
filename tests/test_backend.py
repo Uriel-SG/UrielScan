@@ -1228,7 +1228,7 @@ def test_engine_auto_bootstrap_and_install_endpoints(tmp_path, monkeypatch):
     status_data = raw_client.get("/api/system/status").json()
     assert "bootstrap" in status_data
     assert "engines" in status_data["bootstrap"]
-    for eng in ("nmap", "nuclei", "zap", "tor"):
+    for eng in ("nmap", "nuclei", "zap", "tor", "prowler"):
         assert eng in status_data["bootstrap"]["engines"]
 
     # 2. Portable detection for Nmap & OWASP ZAP inside temporary BIN_DIR

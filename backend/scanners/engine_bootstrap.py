@@ -21,6 +21,7 @@ from backend.scanners.recon_engine import (
     detect_subzy,
     install_subzy,
 )
+from backend.scanners.prowler_engine import detect_prowler, install_prowler
 
 _STATE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()
@@ -37,6 +38,7 @@ BOOTSTRAP_STATE: Dict[str, Any] = {
         "httpx": {"status": "idle", "message": ""},
         "feroxbuster": {"status": "idle", "message": ""},
         "subzy": {"status": "idle", "message": ""},
+        "prowler": {"status": "idle", "message": ""},
     },
 }
 
@@ -70,6 +72,7 @@ async def ensure_all_engines(force: bool = False) -> Dict[str, Any]:
             ("httpx", detect_httpx, install_httpx),
             ("feroxbuster", detect_feroxbuster, install_feroxbuster),
             ("subzy", detect_subzy, install_subzy),
+            ("prowler", detect_prowler, install_prowler),
         ]
 
         for name, detect_fn, install_fn in checks:
@@ -118,6 +121,7 @@ def start_engine_bootstrap_background(force: bool = False, allow_in_test: bool =
         ("httpx", detect_httpx),
         ("feroxbuster", detect_feroxbuster),
         ("subzy", detect_subzy),
+        ("prowler", detect_prowler),
     ):
         det = detect_fn()
         if det.get("installed"):
@@ -156,7 +160,7 @@ def main() -> int:
     engines = state.get("engines", {})
     all_ok = True
     print("\n=== UrielScan Engines Provisioning Summary ===")
-    for name in ("nmap", "nuclei", "zap", "tor", "subfinder", "httpx", "feroxbuster", "subzy"):
+    for name in ("nmap", "nuclei", "zap", "tor", "subfinder", "httpx", "feroxbuster", "subzy", "prowler"):
         info = engines.get(name, {})
         st = info.get("status", "unknown")
         msg = info.get("message", "")
