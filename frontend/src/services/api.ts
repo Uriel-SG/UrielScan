@@ -17,6 +17,8 @@ import {
   NatCheckResult,
   ProbeInstallerPackage,
   WordlistItem,
+  CloudCatalog,
+  CloudProfile,
 } from '../types';
 
 const API_BASE = '/api';
@@ -121,6 +123,7 @@ function normalizeScan(raw: any): Scan {
     enable_subdomain_enum: Boolean(cfg.enable_subdomain_enum),
     enable_dir_enum: Boolean(cfg.enable_dir_enum),
     recon: sum.recon || undefined,
+    cloud_posture: sum.cloud_posture || undefined,
     status: (raw.status || 'pending') as Scan['status'],
     progress: typeof raw.progress === 'number' ? raw.progress : 0,
     started_at: raw.started_at || new Date().toISOString(),
@@ -1193,7 +1196,83 @@ export const api = {
       throw new Error(err.detail || 'Failed to prepare probe installer link');
     }
     return await res.json();
-  }
+  },
+
+  async getCloudCatalog(): Promise<CloudCatalog> {
+    const res = await fetch(`${API_BASE}/cloud/catalog`, {
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Failed to load Cloud Security catalog');
+    return await res.json();
+  },
+
+  async installProwler(): Promise<{ success: boolean; message: string; installed?: boolean; version?: string }> {
+    const res = await fetch(`${API_BASE}/system/install-prowler`, {
+      method: 'POST',
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Failed to install Prowler');
+    return await res.json();
+  },
+
+  async getCloudProfiles(orgId?: string): Promise<CloudProfile[]> {
+    const qs = orgId && orgId !== 'ALL' ? `?org_id=${encodeURIComponent(orgId)}` : '';
+    const res = await fetch(`${API_BASE}/cloud/profiles${qs}`, {
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Failed to fetch Cloud Profiles');
+    return await res.json();
+  },
+
+  async createCloudProfile(payload: {
+    org_id: string | number;
+    name: string;
+    provider: string;
+    credentials: Record<string, string>;
+    region?: string;
+  }): Promise<CloudProfile> {
+    const res = await fetch(`${API_BASE}/cloud/profiles`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Errore salvataggio profilo cloud' }));
+      throw new Error(err.detail || 'Errore salvataggio profilo cloud');
+    }
+    return await res.json();
+  },
+
+  async deleteCloudProfile(profileId: string): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/cloud/profiles/${encodeURIComponent(profileId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(false),
+    });
+    return res.ok;
+  },
+
+  async launchCloudScan(payload: {
+    org_id: string | number;
+    name: string;
+    provider: string;
+    profile_id?: string;
+    credentials?: Record<string, string>;
+    region?: string;
+    compliance?: string;
+    services?: string[];
+    severities?: string[];
+  }): Promise<Scan> {
+    const res = await fetch(`${API_BASE}/cloud/scans`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Impossibile avviare audit Cloud Security' }));
+      throw new Error(err.detail || 'Impossibile avviare audit Cloud Security');
+    }
+    return normalizeScan(await res.json());
+  },
 };
 
 async function triggerBlobDownload(res: Response, fallbackFilename: string): Promise<void> {

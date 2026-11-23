@@ -177,6 +177,13 @@
 .border-theme-accent {
   border-color: var(--accent);
 }
+.bg-theme-accent-soft {
+  background-color: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.row-selected-theme {
+  background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
 
 /* Inputs & Form Controls */
 .input-industrial {

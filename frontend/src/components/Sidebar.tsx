@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   LayoutDashboard,
   Crosshair,
+  Cloud,
   Radar,
   Sparkles,
   FileText,
@@ -15,6 +16,7 @@ import { useI18n } from '../i18n/LanguageContext';
 export type ViewType = 
   | 'dashboard' 
   | 'new-scan' 
+  | 'cloud-security'
   | 'scans' 
   | 'ai-hub' 
   | 'reports' 
@@ -67,6 +69,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       sublabel: L('ZenMap++ NSE Studio', 'ZenMap++ NSE Studio'),
       icon: Crosshair,
       badge: 'Studio',
+    },
+    {
+      id: 'cloud-security' as ViewType,
+      label: L('Cloud Security', 'Cloud Security'),
+      sublabel: L('Prowler CSPM & Compliance', 'Prowler CSPM & Compliance'),
+      icon: Cloud,
+      badge: 'Prowler',
     },
     {
       id: 'scans' as ViewType,

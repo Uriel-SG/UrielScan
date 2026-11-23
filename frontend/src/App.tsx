@@ -3,6 +3,7 @@ import { Navbar, PortalTheme } from './components/Navbar';
 import { Sidebar, ViewType } from './components/Sidebar';
 import { CommandCenter } from './components/CommandCenter';
 import { NewScanStudio } from './components/NewScanStudio';
+import { CloudSecurityView } from './components/CloudSecurityView';
 import { ScansExplorer } from './components/ScansExplorer';
 import { AIPurpleHub } from './components/AIPurpleHub';
 import { ReportCenter } from './components/ReportCenter';
@@ -401,6 +402,17 @@ const AppContent: React.FC = () => {
                   onSelectFinding={handleSelectFinding}
                   onDeleteScan={handleDeleteScan}
                   onNavigateToScansWithFilter={handleNavigateToScansWithFilter}
+                />
+              )}
+
+              {currentView === 'cloud-security' && (
+                <CloudSecurityView
+                  organizations={organizations}
+                  selectedOrgId={selectedOrgId}
+                  scans={scans}
+                  onScanCreated={handleScanCreated}
+                  onNavigateToScan={handleNavigateToScan}
+                  onRefreshData={loadInitialData}
                 />
               )}
 

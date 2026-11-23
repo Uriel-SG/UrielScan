@@ -212,6 +212,63 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
     """
 
 
+def _build_cloud_posture_html_section(cloud_posture: Dict[str, Any], is_it: bool) -> str:
+    """Build bilingual HTML section for Prowler Cloud Security Posture (CSPM)."""
+    if not isinstance(cloud_posture, dict) or not cloud_posture.get("provider"):
+        return ""
+    sec_title = "Cloud Security Posture (Prowler CSPM)"
+    provider = str(cloud_posture.get("provider") or "").upper()
+    account = str(cloud_posture.get("account") or "-")
+    compliance = str(cloud_posture.get("compliance") or "Default Checks")
+    passed = int(cloud_posture.get("passed") or 0)
+    failed = int(cloud_posture.get("failed") or 0)
+    manual = int(cloud_posture.get("manual") or 0)
+    pass_rate = float(cloud_posture.get("pass_rate") or 0.0)
+    by_service = cloud_posture.get("by_service") or {}
+
+    svc_rows = ""
+    for svc_name, counts in sorted(
+        by_service.items(),
+        key=lambda kv: int((kv[1] or {}).get("failed", 0)),
+        reverse=True,
+    )[:25]:
+        if not isinstance(counts, dict):
+            continue
+        svc_rows += (
+            f"<tr>"
+            f"<td><strong>{_esc(svc_name)}</strong></td>"
+            f"<td style='color:#059669;font-weight:bold;'>{int(counts.get('passed', 0))}</td>"
+            f"<td style='color:#dc2626;font-weight:bold;'>{int(counts.get('failed', 0))}</td>"
+            f"<td>{int(counts.get('manual', 0))}</td>"
+            f"</tr>"
+        )
+    svc_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("Stato Controlli per Servizio Cloud" if is_it else "Checks Breakdown by Cloud Service")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>Service</th><th>Passed</th><th>Failed</th><th>Manual</th>"
+        + f"</tr></thead><tbody>{svc_rows}</tbody></table>"
+        if svc_rows
+        else ""
+    )
+
+    return f"""
+        <h2 class="section-title page-break-before">{_esc(sec_title)}</h2>
+        <div class="exec-card" style="margin-bottom:16px;">
+            <div style="font-size:13px;display:flex;gap:18px;flex-wrap:wrap;">
+                <span><strong>Provider:</strong> {_esc(provider)}</span>
+                <span><strong>Account:</strong> <code>{_esc(account)}</code></span>
+                <span><strong>Compliance:</strong> {_esc(compliance)}</span>
+                <span><strong>Pass Rate:</strong> {pass_rate:.1f}%</span>
+                <span><strong>Passed:</strong> {passed}</span>
+                <span><strong>Failed:</strong> {failed}</span>
+                <span><strong>Manual:</strong> {manual}</span>
+            </div>
+        </div>
+        {svc_table}
+    """
+
+
 def generate_html_report(
     scan_id: int,
     classification: str = "CONFIDENTIAL - PURPLE TEAM ASSESSMENT",
@@ -902,6 +959,7 @@ def generate_html_report(
         </table>
 
         {_build_recon_html_section(summary.get("recon") or {}, is_it)}
+        {_build_cloud_posture_html_section(summary.get("cloud_posture") or {}, is_it)}
 
         <!-- Detailed Technical Dossiers -->
         <h2 class="section-title page-break-before">{sec4_title}</h2>

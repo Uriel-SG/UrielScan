@@ -114,6 +114,7 @@ export interface Scan {
   hosts_count: number;
   hosts?: HostInfo[];
   logs: string[];
+  cloud_posture?: CloudPostureSummary;
   ai_analysis?: {
     executive_summary: string;
     red_team_paths: string[];
@@ -388,4 +389,57 @@ export interface ProbeInstallerPackage {
   local_download_path: string;
   silent_command: string;
   expires_in_seconds: number;
+}
+
+export interface CloudPostureSummary {
+  provider: string;
+  account: string;
+  compliance: string;
+  services: string[];
+  passed: number;
+  failed: number;
+  manual: number;
+  total_checks: number;
+  pass_rate: number;
+  by_service: Record<string, { passed: number; failed: number; manual: number }>;
+  by_severity: Record<string, number>;
+}
+
+export interface CloudProfile {
+  id: string;
+  org_id: string;
+  org_name?: string;
+  name: string;
+  provider: string;
+  region?: string;
+  credentials_masked: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CloudProviderSpec {
+  id: string;
+  label: string;
+  short: string;
+  default_region: string;
+  default_services: string[];
+  compliances: string[];
+  fields: Array<{
+    key: string;
+    label: string;
+    secret: boolean;
+    placeholder?: string;
+    multiline?: boolean;
+  }>;
+}
+
+export interface CloudCatalog {
+  engine: {
+    installed: boolean;
+    mode: string;
+    path: string;
+    version: string;
+  };
+  providers: Record<string, CloudProviderSpec>;
+  compliances: Array<{ id: string; label: string }>;
 }

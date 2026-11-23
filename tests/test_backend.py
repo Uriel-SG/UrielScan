@@ -1874,3 +1874,123 @@ def test_tech_stack_fingerprinting_and_cve_poc_intel(monkeypatch):
     with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
         doc_xml = zf.read("word/document.xml").decode("utf-8")
         assert "WordPress" in doc_xml and "CISA KEV" in doc_xml and "CVE-2024-99999-poc" in doc_xml
+
+
+def test_cloud_security_prowler_profiles_ocsf_and_reports(monkeypatch):
+    import io
+    import json
+    import zipfile
+    import backend.main as main_mod
+    from backend.database import get_db_connection
+    from backend.export_engine import generate_docx_report, generate_pdf_document
+    from backend.report_engine import generate_html_report
+    from backend.scanners import prowler_engine
+
+    # 1. Encrypted cloud credentials round-trip & masking (zero plaintext leakage)
+    secret_creds = {
+        "aws_access_key_id": "AKIATESTKEY123456789",
+        "aws_secret_access_key": "super-secret-aws-key-value",
+    }
+    enc = prowler_engine.encrypt_cloud_credentials(secret_creds)
+    assert enc.startswith("v1:") and "super-secret-aws-key-value" not in enc
+    dec = prowler_engine.decrypt_cloud_credentials(enc)
+    assert dec == secret_creds
+    masked = prowler_engine.mask_cloud_credentials(secret_creds)
+    assert masked["aws_secret_access_key"] == "***configured***"
+    assert "super-secret-aws-key-value" not in json.dumps(masked)
+
+    # 2. Cloud catalog & profile CRUD endpoints
+    cat_resp = client.get("/api/cloud/catalog")
+    assert cat_resp.status_code == 200
+    cat_data = cat_resp.json()
+    assert "aws" in cat_data["providers"] and "azure" in cat_data["providers"] and "gcp" in cat_data["providers"]
+    assert "prowler" in client.get("/api/system/status").json()["engines"]
+
+    prof_resp = client.post("/api/cloud/profiles", json={
+        "org_id": 1,
+        "name": "AWS Prod Audit",
+        "provider": "aws",
+        "region": "eu-west-1",
+        "credentials": secret_creds,
+    })
+    assert prof_resp.status_code == 201
+    prof = prof_resp.json()
+    assert prof["provider"] == "aws"
+    assert "super-secret-aws-key-value" not in json.dumps(prof)
+
+    list_resp = client.get("/api/cloud/profiles", params={"org_id": 1})
+    assert list_resp.status_code == 200
+    profs = list_resp.json()
+    assert any(p["id"] == prof["id"] and "super-secret-aws-key-value" not in json.dumps(p) for p in profs)
+
+    # 3. OCSF JSON parsing into cloud_posture + prowler findings
+    sample_ocsf = json.dumps([
+        {
+            "status_code": "PASS",
+            "severity": "low",
+            "cloud": {"account": {"uid": "123456789012"}},
+            "resources": [{"uid": "arn:aws:s3:::ok-bucket", "region": "eu-west-1", "group": {"name": "s3"}}],
+            "finding_info": {"title": "S3 bucket encryption enabled", "desc": "OK"},
+        },
+        {
+            "status_code": "FAIL",
+            "severity": "critical",
+            "status_detail": "Bucket ACL allows AllUsers read",
+            "cloud": {"account": {"uid": "123456789012"}},
+            "resources": [{"uid": "arn:aws:s3:::public-bucket", "region": "eu-west-1", "group": {"name": "s3"}}],
+            "finding_info": {"uid": "s3_bucket_public_read", "title": "S3 Bucket Public Read Access", "desc": "Public bucket exposed"},
+            "remediation": {"desc": "Enable S3 Block Public Access", "references": ["https://docs.aws.amazon.com/s3"]},
+        },
+    ])
+    posture, cloud_findings = prowler_engine.parse_prowler_ocsf_json(sample_ocsf, "aws", compliance="cis_3.0_aws")
+    assert posture["provider"] == "aws"
+    assert posture["account"] == "123456789012"
+    assert posture["passed"] == 1 and posture["failed"] == 1 and posture["pass_rate"] == 50.0
+    assert posture["by_service"]["s3"]["failed"] == 1
+    assert len(cloud_findings) == 1
+    assert cloud_findings[0]["source_engine"] == "prowler"
+    assert "[Prowler/AWS]" in cloud_findings[0]["title"]
+
+    # 4. Launch cloud scan endpoint (mocked background execution) & render HTML/PDF/DOCX
+    captured = {}
+    def _fake_bg(sid, payload):
+        captured["scan_id"] = sid
+        captured["payload"] = payload
+
+    monkeypatch.setattr(main_mod, "start_cloud_scan_in_background", _fake_bg)
+    cscan_resp = client.post("/api/cloud/scans", json={
+        "org_id": 1,
+        "name": "AWS CIS Audit",
+        "provider": "aws",
+        "profile_id": prof["id"],
+        "compliance": "cis_3.0_aws",
+        "services": ["s3", "iam"],
+        "severities": ["critical", "high"],
+    })
+    assert cscan_resp.status_code == 201
+    cscan = cscan_resp.json()
+    assert captured["payload"]["credentials"] == secret_creds
+
+    conn = get_db_connection()
+    with conn:
+        conn.execute(
+            "UPDATE scans SET status='completed', summary_json=? WHERE id=?;",
+            (json.dumps({"total_hosts": 1, "total_findings": 1, "risk_score": 25, "cloud_posture": posture}), int(cscan["id"])),
+        )
+    conn.close()
+
+    html_rep = generate_html_report(int(cscan["id"]), lang="en")
+    html_body = open(html_rep["file_path"], encoding="utf-8").read()
+    assert "Cloud Security Posture (Prowler CSPM)" in html_body and "123456789012" in html_body
+
+    pdf_bytes = generate_pdf_document("Cloud PDF", "CONFIDENTIAL", {}, {"name": "Client"}, "AWS", [], cloud_findings, cloud_posture=posture)
+    assert pdf_bytes.startswith(b"%PDF") and len(pdf_bytes) > 5000
+
+    docx_bytes = generate_docx_report("Cloud DOCX", "CONFIDENTIAL", {}, {"name": "Client"}, "AWS", [], cloud_findings, cloud_posture=posture)
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "Cloud Security Posture (Prowler CSPM)" in doc_xml and "123456789012" in doc_xml
+
+    # 5. Cleanup profile
+    del_resp = client.delete(f"/api/cloud/profiles/{prof['id']}")
+    assert del_resp.status_code == 200

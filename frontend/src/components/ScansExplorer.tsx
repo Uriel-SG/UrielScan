@@ -455,11 +455,16 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                           onSelectScan(s.id);
                           setShowAllScansHistory(false);
                         }}
-                        className={`cursor-pointer transition-colors hover:bg-subtle/60 ${isSelected ? 'bg-subtle/40' : ''}`}
+                        className={`cursor-pointer transition-colors hover:bg-subtle/60 ${isSelected ? 'row-selected-theme' : ''}`}
                       >
                         <td className="py-3 px-4">
-                          <div className="font-semibold text-theme-primary flex items-center gap-2">
-                            <span>{s.name}</span>
+                          <div className="font-semibold flex items-center gap-2">
+                            <span className={isSelected ? 'text-theme-accent font-bold' : 'text-theme-primary'}>{s.name}</span>
+                            {isSelected && (
+                              <span className="bg-theme-accent text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">
+                                {L('SELECTED', 'SELEZIONATA')}
+                              </span>
+                            )}
                             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-secondary">
                               {s.status.toUpperCase()}
                             </span>
@@ -644,10 +649,15 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                         onSelectScan('ALL');
                         setIsScanDropdownOpen(false);
                       }}
-                      className={`w-full px-3 py-2 text-left hover:bg-subtle transition-colors ${isAllScansMode ? 'bg-subtle/70' : ''}`}
+                      className={`w-full px-3 py-2 text-left hover:bg-subtle transition-colors ${isAllScansMode ? 'row-selected-theme' : ''}`}
                     >
-                      <div className="text-xs font-bold text-theme-accent">
-                        {L('ALL SCANS', 'TUTTE LE SCANSIONI')} ({scans.length} {L('sessions — MSP Aggregated View', 'sessioni — Vista Aggregata MSP')})
+                      <div className="text-xs font-bold text-theme-accent flex items-center justify-between gap-2">
+                        <span>{L('ALL SCANS', 'TUTTE LE SCANSIONI')} ({scans.length} {L('sessions — MSP Aggregated View', 'sessioni — Vista Aggregata MSP')})</span>
+                        {isAllScansMode && (
+                          <span className="bg-theme-accent text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">
+                            {L('ACTIVE', 'ATTIVA')}
+                          </span>
+                        )}
                       </div>
                       <div className="text-[10px] font-mono text-theme-muted mt-0.5">
                         {L('Full aggregation of all recorded sessions', 'Aggregazione completa di tutte le sessioni registrate')}
@@ -664,13 +674,22 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                           onSelectScan(s.id);
                           setIsScanDropdownOpen(false);
                         }}
-                        className={`w-full px-3 py-2 text-left hover:bg-subtle transition-colors ${active ? 'bg-subtle/70' : ''}`}
+                        className={`w-full px-3 py-2 text-left hover:bg-subtle transition-colors ${active ? 'row-selected-theme' : ''}`}
                       >
-                        <div className="text-xs font-semibold text-theme-primary flex items-center justify-between gap-2">
-                          <span className="truncate">[{getOrgName(s.org_id)}] {s.name}</span>
-                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-secondary shrink-0">
-                            {s.status.toUpperCase()}
+                        <div className="text-xs flex items-center justify-between gap-2">
+                          <span className={`truncate ${active ? 'text-theme-accent font-bold' : 'text-theme-primary font-semibold'}`}>
+                            [{getOrgName(s.org_id)}] {s.name}
                           </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {active && (
+                              <span className="bg-theme-accent text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">
+                                {L('ACTIVE', 'ATTIVA')}
+                              </span>
+                            )}
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-secondary shrink-0">
+                              {s.status.toUpperCase()}
+                            </span>
+                          </div>
                         </div>
                         <div className="text-[10px] font-mono text-theme-muted mt-0.5 truncate">
                           {formatScanDateTime(s.started_at)} • {s.targets}

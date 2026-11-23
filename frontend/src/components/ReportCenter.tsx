@@ -81,12 +81,14 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
   const [exportingFormat, setExportingFormat] = useState<'docx' | 'pdf' | 'html' | null>(null);
   const [urielLogoDataUri, setUrielLogoDataUri] = useState<string>('');
   const [savedReports, setSavedReports] = useState<SavedReport[]>([]);
+  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [isReportDropdownOpen, setIsReportDropdownOpen] = useState<boolean>(false);
   const [showAllReports, setShowAllReports] = useState<boolean>(false);
   const [reportSearch, setReportSearch] = useState<string>('');
   const [reportToDelete, setReportToDelete] = useState<SavedReport | null>(null);
   const [isDeletingReport, setIsDeletingReport] = useState<boolean>(false);
   const reportDropdownRef = useRef<HTMLDivElement>(null);
+  const activeSavedReport = savedReports.find((r) => r.id === selectedReportId) || savedReports[0] || null;
 
   const loadSavedReports = async () => {
     try {
@@ -497,15 +499,29 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
                 <tbody className="divide-y divide-theme-subtle text-xs">
                   {filteredSaved.map((r) => {
                     const fmt = getReportFormat(r);
+                    const isSelected = activeSavedReport?.id === r.id;
                     return (
-                      <tr key={r.id} className="hover:bg-subtle/60 transition">
+                      <tr
+                        key={r.id}
+                        onClick={() => setSelectedReportId(r.id)}
+                        className={`cursor-pointer hover:bg-subtle/60 transition ${isSelected ? 'row-selected-theme' : ''}`}
+                      >
                         <td className="py-2.5 px-3">
                           <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border border-theme bg-panel text-theme-accent">
                             {fmt}
                           </span>
                         </td>
-                        <td className="py-2.5 px-3 font-medium text-theme-primary max-w-md truncate" title={r.title}>
-                          {r.title}
+                        <td className="py-2.5 px-3 max-w-md" title={r.title}>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={`truncate ${isSelected ? 'text-theme-accent font-semibold' : 'text-theme-primary font-medium'}`}>
+                              {r.title}
+                            </span>
+                            {isSelected && (
+                              <span className="bg-theme-accent text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">
+                                {L('SELECTED', 'ATTIVO')}
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="py-2.5 px-3 text-theme-secondary">{r.org_name || `Org #${r.org_id}`}</td>
                         <td className="py-2.5 px-3 font-mono text-[11px] text-theme-muted">
@@ -514,9 +530,11 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
                         <td className="py-2.5 px-3 text-right space-x-1.5 whitespace-nowrap">
                           <button
                             type="button"
-                            onClick={() =>
-                              api.openSavedReport(r.id, false).catch((e) => showToast(e?.message || 'Error', 'error'))
-                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedReportId(r.id);
+                              api.openSavedReport(r.id, false).catch((err) => showToast(err?.message || 'Error', 'error'));
+                            }}
                             className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center space-x-1"
                             title={L('View / Open Report', 'Visualizza / Apri Report')}
                           >
@@ -525,9 +543,11 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() =>
-                              api.openSavedReport(r.id, true).catch((e) => showToast(e?.message || 'Error', 'error'))
-                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedReportId(r.id);
+                              api.openSavedReport(r.id, true).catch((err) => showToast(err?.message || 'Error', 'error'));
+                            }}
                             className="btn-secondary px-2 py-1 text-[11px] inline-flex items-center space-x-1"
                             title={L('Download File', 'Scarica File')}
                           >
@@ -535,7 +555,10 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => setReportToDelete(r)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setReportToDelete(r);
+                            }}
                             className="btn-secondary px-2 py-1 text-[11px] text-red-400 hover:border-red-500/60 inline-flex items-center"
                             title={L('Delete Report', 'Elimina Report')}
                           >
@@ -661,13 +684,13 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
                 className="input-industrial px-2.5 py-1 text-left flex items-center justify-between gap-3 min-w-[260px] max-w-[430px]"
               >
                 <div className="min-w-0">
-                  {savedReports.length > 0 ? (
+                  {activeSavedReport ? (
                     <>
                       <div className="text-xs font-semibold text-theme-primary truncate">
-                        [{getReportFormat(savedReports[0])}] {savedReports[0].title}
+                        [{getReportFormat(activeSavedReport)}] {activeSavedReport.title}
                       </div>
                       <div className="text-[10px] font-mono text-theme-muted truncate">
-                        {formatReportDate(savedReports[0].created_at)} — {savedReports[0].org_name || `Org #${savedReports[0].org_id}`}
+                        {formatReportDate(activeSavedReport.created_at)} — {activeSavedReport.org_name || `Org #${activeSavedReport.org_id}`}
                       </div>
                     </>
                   ) : (
@@ -681,27 +704,40 @@ export const ReportCenter: React.FC<ReportCenterProps> = ({
 
               {isReportDropdownOpen && savedReports.length > 0 && (
                 <div className="absolute left-0 top-full mt-1 w-96 bg-panel border border-theme rounded shadow-xl z-50 max-h-72 overflow-y-auto py-1">
-                  {savedReports.map((r) => (
-                    <button
-                      key={r.id}
-                      type="button"
-                      onClick={() => {
-                        setIsReportDropdownOpen(false);
-                        api.openSavedReport(r.id, false).catch((e) => showToast(e?.message || 'Error', 'error'));
-                      }}
-                      className="w-full px-3 py-2 text-left hover:bg-hover transition border-b border-theme-subtle last:border-b-0 cursor-pointer"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-theme-primary truncate">{r.title}</span>
-                        <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-accent shrink-0">
-                          {getReportFormat(r)}
-                        </span>
-                      </div>
-                      <div className="text-[10px] font-mono text-theme-muted mt-0.5 truncate">
-                        {formatReportDate(r.created_at)} • {r.org_name || `Org #${r.org_id}`}
-                      </div>
-                    </button>
-                  ))}
+                  {savedReports.map((r) => {
+                    const isSelected = activeSavedReport?.id === r.id;
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedReportId(r.id);
+                          setIsReportDropdownOpen(false);
+                          api.openSavedReport(r.id, false).catch((e) => showToast(e?.message || 'Error', 'error'));
+                        }}
+                        className={`w-full px-3 py-2 text-left hover:bg-hover transition border-b border-theme-subtle last:border-b-0 cursor-pointer ${isSelected ? 'row-selected-theme' : ''}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={`text-xs truncate ${isSelected ? 'text-theme-accent font-bold' : 'text-theme-primary font-semibold'}`}>
+                            {r.title}
+                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {isSelected && (
+                              <span className="bg-theme-accent text-[9px] font-mono font-bold px-1.5 py-0.5 rounded uppercase shrink-0">
+                                {L('SELECTED', 'ATTIVO')}
+                              </span>
+                            )}
+                            <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-subtle border border-theme text-theme-accent shrink-0">
+                              {getReportFormat(r)}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-[10px] font-mono text-theme-muted mt-0.5 truncate">
+                          {formatReportDate(r.created_at)} • {r.org_name || `Org #${r.org_id}`}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>

@@ -213,6 +213,19 @@ def init_db() -> None:
         payload_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS cloud_profiles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        org_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        credentials_enc TEXT NOT NULL,
+        region TEXT DEFAULT '',
+        metadata_json TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+    );
     """)
 
     conn.commit()

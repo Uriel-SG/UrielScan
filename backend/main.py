@@ -52,6 +52,16 @@ from backend.scanners.recon_engine import (
     install_subzy,
 )
 from backend.scanners.wordlists import list_wordlists, save_custom_wordlist, delete_custom_wordlist
+from backend.scanners.prowler_engine import (
+    CLOUD_PROVIDERS,
+    COMPLIANCE_FRAMEWORKS,
+    detect_prowler,
+    install_prowler,
+    encrypt_cloud_credentials,
+    decrypt_cloud_credentials,
+    mask_cloud_credentials,
+    start_cloud_scan_in_background,
+)
 from backend.scanners.tor_engine import (
     detect_tor,
     install_tor,
@@ -274,6 +284,26 @@ class ProbeInstallerRequest(BaseModel):
     interval: int = Field(5, ge=2, le=300)
 
 
+class CloudProfileCreateModel(BaseModel):
+    org_id: int | str
+    name: str = Field(..., min_length=1, max_length=120)
+    provider: str = Field(..., min_length=2, max_length=32)
+    credentials: Dict[str, Any] = Field(default_factory=dict)
+    region: Optional[str] = ""
+
+
+class CloudScanCreateModel(BaseModel):
+    org_id: int | str
+    name: str = Field(..., min_length=1, max_length=160)
+    provider: str = Field(..., min_length=2, max_length=32)
+    profile_id: Optional[int | str] = None
+    credentials: Optional[Dict[str, Any]] = None
+    region: Optional[str] = ""
+    compliance: Optional[str] = ""
+    services: Optional[List[str]] = None
+    severities: Optional[List[str]] = None
+
+
 class ProbeHeartbeatModel(BaseModel):
     hostname: Optional[str] = ""
     ip_address: Optional[str] = ""
@@ -402,6 +432,7 @@ async def get_system_status():
             "httpx": httpx_info,
             "feroxbuster": feroxbuster_info,
             "subzy": subzy_info,
+            "prowler": detect_prowler(),
         },
         "bootstrap": get_bootstrap_state(),
     }
@@ -440,6 +471,176 @@ async def install_feroxbuster_endpoint():
 @app.post("/api/system/install-subzy")
 async def install_subzy_endpoint():
     return await install_subzy()
+
+
+@app.post("/api/system/install-prowler")
+async def install_prowler_endpoint():
+    return await install_prowler()
+
+
+@app.get("/api/cloud/catalog")
+async def get_cloud_catalog_endpoint():
+    return {
+        "engine": detect_prowler(),
+        "providers": CLOUD_PROVIDERS,
+        "compliances": COMPLIANCE_FRAMEWORKS,
+    }
+
+
+@app.get("/api/cloud/profiles")
+async def list_cloud_profiles_endpoint(org_id: Optional[str] = Query(None)):
+    conn = get_db_connection()
+    if org_id is not None and str(org_id).strip() != "":
+        oid = _parse_int_id(org_id)
+        rows = conn.execute(
+            """
+            SELECT cp.*, o.name AS org_name
+            FROM cloud_profiles cp
+            LEFT JOIN organizations o ON cp.org_id = o.id
+            WHERE cp.org_id = ?
+            ORDER BY cp.created_at DESC;
+            """,
+            (oid,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT cp.*, o.name AS org_name
+            FROM cloud_profiles cp
+            LEFT JOIN organizations o ON cp.org_id = o.id
+            ORDER BY cp.created_at DESC;
+            """
+        ).fetchall()
+    conn.close()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        creds = decrypt_cloud_credentials(r["credentials_enc"])
+        out.append({
+            "id": str(r["id"]),
+            "org_id": str(r["org_id"]),
+            "org_name": r["org_name"] or "",
+            "name": r["name"],
+            "provider": r["provider"],
+            "region": r["region"] or "",
+            "credentials_masked": mask_cloud_credentials(creds),
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        })
+    return out
+
+
+@app.post("/api/cloud/profiles", status_code=201)
+async def create_cloud_profile_endpoint(payload: CloudProfileCreateModel):
+    oid = _parse_int_id(payload.org_id)
+    org = get_organization_by_id(oid)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organizzazione non trovata.")
+    prov = payload.provider.strip().lower()
+    if prov not in CLOUD_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Provider Cloud non supportato.")
+    clean_creds = {str(k): str(v) for k, v in (payload.credentials or {}).items() if v is not None and str(v).strip() != ""}
+    enc = encrypt_cloud_credentials(clean_creds)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO cloud_profiles (org_id, name, provider, credentials_enc, region, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, '{}', ?, ?);
+            """,
+            (oid, payload.name.strip(), prov, enc, (payload.region or "").strip(), now_iso, now_iso),
+        )
+        pid = cur.lastrowid
+    conn.close()
+    return {
+        "id": str(pid),
+        "org_id": str(oid),
+        "org_name": org.get("name", ""),
+        "name": payload.name.strip(),
+        "provider": prov,
+        "region": (payload.region or "").strip(),
+        "credentials_masked": mask_cloud_credentials(clean_creds),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+
+@app.delete("/api/cloud/profiles/{profile_id}")
+async def delete_cloud_profile_endpoint(profile_id: str):
+    pid = _parse_int_id(profile_id)
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute("DELETE FROM cloud_profiles WHERE id = ?;", (pid,))
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Profilo Cloud non trovato.")
+    return {"success": True, "deleted_id": str(pid)}
+
+
+@app.post("/api/cloud/scans", status_code=201)
+async def create_cloud_scan_endpoint(payload: CloudScanCreateModel):
+    oid = _parse_int_id(payload.org_id)
+    org = get_organization_by_id(oid)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organizzazione non trovata.")
+    prov = payload.provider.strip().lower()
+    if prov not in CLOUD_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Provider Cloud non supportato.")
+
+    creds: Dict[str, Any] = {}
+    region = (payload.region or "").strip()
+    if payload.profile_id is not None and str(payload.profile_id).strip() != "":
+        pid = _parse_int_id(payload.profile_id)
+        conn = get_db_connection()
+        row = conn.execute("SELECT * FROM cloud_profiles WHERE id = ? AND org_id = ?;", (pid, oid)).fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Profilo Cloud salvato non trovato.")
+        creds = decrypt_cloud_credentials(row["credentials_enc"])
+        if not region:
+            region = row["region"] or ""
+
+    if payload.credentials:
+        for k, v in payload.credentials.items():
+            if v is not None and str(v).strip() != "":
+                creds[str(k)] = str(v)
+
+    comp = (payload.compliance or "").strip()
+    target_label = f"{prov.upper()} ({comp or 'Full Audit'})"
+    cfg = {
+        "provider": prov,
+        "compliance": comp,
+        "services": payload.services or [],
+        "severities": payload.severities or [],
+        "region": region,
+        "profile_id": str(payload.profile_id) if payload.profile_id is not None else None,
+    }
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO scans (org_id, name, targets, scan_profile, engines_json, config_json, status, progress, current_task, started_at)
+            VALUES (?, ?, ?, 'Cloud Security (Prowler)', ?, ?, 'running', 0, 'Inizializzazione audit Prowler...', ?);
+            """,
+            (oid, payload.name.strip(), target_label, json.dumps(["prowler"]), json.dumps(cfg), now_iso),
+        )
+        scan_id = cur.lastrowid
+    conn.close()
+
+    start_cloud_scan_in_background(
+        scan_id,
+        {
+            "provider": prov,
+            "credentials": creds,
+            "region": region,
+            "compliance": comp,
+            "services": payload.services or [],
+            "severities": payload.severities or [],
+        },
+    )
+    return get_scan_by_id(scan_id)
 
 
 @app.get("/api/wordlists")
@@ -1146,6 +1347,7 @@ async def export_scan_results(
     else:
         export_class = "ESPORTAZIONE RISULTATI SCANSIONE" if is_it else "SCAN RESULTS EXPORT"
         single_recon = (scans_meta[0].get("summary") or {}).get("recon") if len(scans_meta) == 1 else None
+        single_cloud = (scans_meta[0].get("summary") or {}).get("cloud_posture") if len(scans_meta) == 1 else None
         data = generate_pdf_document(
             report_title=title,
             classification=export_class,
@@ -1162,6 +1364,7 @@ async def export_scan_results(
             org_map=org_map if len(scans_meta) > 1 else None,
             lang=lang,
             recon_summary=single_recon,
+            cloud_posture=single_cloud,
         )
         media_type = "application/pdf"
         filename = f"urielscan_{safe_slug}.pdf"
@@ -1439,6 +1642,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
     fmt = req.format.lower()
     saved_report_id = ""
     scan_recon_summary = (scan.get("summary") or {}).get("recon")
+    scan_cloud_posture = (scan.get("summary") or {}).get("cloud_posture")
     if fmt == "pdf":
         data = generate_pdf_document(
             report_title=title,
@@ -1455,6 +1659,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             include_host_topology=req.include_host_topology,
             lang=lang,
             recon_summary=scan_recon_summary,
+            cloud_posture=scan_cloud_posture,
         )
         media_type = "application/pdf"
         filename = f"urielscan_report_scan_{sid}.pdf"
@@ -1474,6 +1679,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             include_host_topology=req.include_host_topology,
             lang=lang,
             recon_summary=scan_recon_summary,
+            cloud_posture=scan_cloud_posture,
         )
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         filename = f"urielscan_report_scan_{sid}.docx"

@@ -310,6 +310,7 @@ def generate_pdf_document(
     org_map: Optional[Dict[int, Dict[str, Any]]] = None,
     lang: str = "en",
     recon_summary: Optional[Dict[str, Any]] = None,
+    cloud_posture: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Generates a structured, printable A4 PDF report/export using ReportLab."""
     findings = sort_findings_by_severity(findings)
@@ -649,6 +650,38 @@ def generate_pdf_document(
             story.append(ct)
             story.append(Spacer(1, 4 * mm))
 
+    if isinstance(cloud_posture, dict) and cloud_posture.get("provider"):
+        story.append(Paragraph("Cloud Security Posture (Prowler CSPM)", h2_style))
+        story.append(
+            Paragraph(
+                f"Provider: <b>{str(cloud_posture.get('provider') or '').upper()}</b> | "
+                f"Account: <b>{_safe_para_text(str(cloud_posture.get('account') or '-'))}</b> | "
+                f"Compliance: <b>{_safe_para_text(str(cloud_posture.get('compliance') or 'Default'))}</b> | "
+                f"Pass Rate: <b>{float(cloud_posture.get('pass_rate') or 0.0):.1f}%</b> "
+                f"({int(cloud_posture.get('passed') or 0)} PASS / {int(cloud_posture.get('failed') or 0)} FAIL)",
+                body_style,
+            )
+        )
+        story.append(Spacer(1, 2 * mm))
+        by_svc = cloud_posture.get("by_service") or {}
+        if isinstance(by_svc, dict) and by_svc:
+            cp_rows = [["Cloud Service", "Passed", "Failed", "Manual"]]
+            for sname, cnt in sorted(by_svc.items(), key=lambda kv: int((kv[1] or {}).get("failed", 0)), reverse=True)[:20]:
+                if isinstance(cnt, dict):
+                    cp_rows.append([str(sname), str(int(cnt.get("passed", 0))), str(int(cnt.get("failed", 0))), str(int(cnt.get("manual", 0)))])
+            pt = Table(cp_rows, colWidths=[90 * mm, 30 * mm, 30 * mm, 30 * mm], repeatRows=1)
+            pt.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f766e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(pt)
+            story.append(Spacer(1, 4 * mm))
+
     # Findings Detail
     story.append(Paragraph(
         f"4. Inventario Vulnerabilita & Evidenze ({len(findings)})" if is_it else f"4. Vulnerability & Evidence Inventory ({len(findings)})",
@@ -715,6 +748,7 @@ def generate_docx_report(
     include_host_topology: bool = True,
     lang: str = "en",
     recon_summary: Optional[Dict[str, Any]] = None,
+    cloud_posture: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Generates an editable OpenXML (.docx) report compatible with Microsoft Word,
@@ -994,6 +1028,25 @@ def generate_docx_report(
                     pocs,
                 ])
             body_parts.append(table_xml(ci_rows))
+        body_parts.append(p_xml("", space_after=120))
+
+    if isinstance(cloud_posture, dict) and cloud_posture.get("provider"):
+        body_parts.append(heading_xml("Cloud Security Posture (Prowler CSPM)", level=2))
+        body_parts.append(p_xml(
+            f"Provider: {str(cloud_posture.get('provider') or '').upper()} | "
+            f"Account: {str(cloud_posture.get('account') or '-')} | "
+            f"Compliance: {str(cloud_posture.get('compliance') or 'Default')} | "
+            f"Pass Rate: {float(cloud_posture.get('pass_rate') or 0.0):.1f}% "
+            f"({int(cloud_posture.get('passed') or 0)} PASS / {int(cloud_posture.get('failed') or 0)} FAIL)",
+            bold=True,
+        ))
+        by_svc = cloud_posture.get("by_service") or {}
+        if isinstance(by_svc, dict) and by_svc:
+            cp_rows = [["Cloud Service", "Passed", "Failed", "Manual"]]
+            for sname, cnt in sorted(by_svc.items(), key=lambda kv: int((kv[1] or {}).get("failed", 0)), reverse=True)[:20]:
+                if isinstance(cnt, dict):
+                    cp_rows.append([str(sname), str(int(cnt.get("passed", 0))), str(int(cnt.get("failed", 0))), str(int(cnt.get("manual", 0)))])
+            body_parts.append(table_xml(cp_rows))
         body_parts.append(p_xml("", space_after=120))
 
     # Section 4: Findings
