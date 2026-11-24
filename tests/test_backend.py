@@ -2166,17 +2166,32 @@ def test_internal_ad_netexec_enum4linux_bloodhound_azurehound_responder(monkeypa
     })
     assert resp_denied.status_code == 400
 
+    resp_empty = client.post("/api/internal/responder/start", json={
+        "mode": "passive",
+        "active_authorized": False,
+        "interface": "all",
+        "bind_ip": "127.0.0.1",
+        "protocols": {"llmnr": False, "nbns": False, "mdns": False, "smb": True},
+    })
+    assert resp_empty.status_code == 400
+
     resp_start = client.post("/api/internal/responder/start", json={
         "mode": "passive",
         "active_authorized": False,
         "interface": "all",
         "bind_ip": "127.0.0.1",
+        "protocols": {"llmnr": True, "nbns": False, "mdns": False, "smb": False, "http": False},
+        "options": {"wpad": True},
     })
     assert resp_start.status_code == 200
     assert resp_start.json()["running"] is True
+    assert resp_start.json()["protocols"]["llmnr"] is True
+    assert resp_start.json()["protocols"]["smb"] is False
+    assert resp_start.json()["options"]["wpad"] is True
 
     resp_st = client.get("/api/internal/responder/status")
     assert resp_st.status_code == 200 and resp_st.json()["running"] is True
+    assert resp_st.json()["protocols"]["nbns"] is False
 
     resp_stop = client.post("/api/internal/responder/stop")
     assert resp_stop.status_code == 200 and resp_stop.json()["running"] is False

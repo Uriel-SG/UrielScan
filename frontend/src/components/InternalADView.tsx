@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Download,
   FolderUp,
   Network,
@@ -9,6 +10,7 @@ import {
   Radio,
   RefreshCw,
   ShieldAlert,
+  Sliders,
   Square,
   Terminal,
   UploadCloud,
@@ -91,6 +93,25 @@ export const InternalADPanel: React.FC<InternalADPanelProps> = ({
   const [responderActiveAuthorized, setResponderActiveAuthorized] = useState<boolean>(false);
   const [responderStatus, setResponderStatus] = useState<ResponderSessionStatus | null>(null);
   const [responderBusy, setResponderBusy] = useState<boolean>(false);
+  const [showResponderConfig, setShowResponderConfig] = useState<boolean>(false);
+  const [responderProtocols, setResponderProtocols] = useState<Record<string, boolean>>({
+    llmnr: true,
+    nbns: true,
+    mdns: true,
+    smb: true,
+    http: true,
+    https: true,
+    ldap: true,
+    sql: true,
+    ftp: true,
+    dns: true,
+  });
+  const [responderOptions, setResponderOptions] = useState<Record<string, boolean>>({
+    wpad: false,
+    force_wpad_auth: false,
+    basic_auth: false,
+    dhcp: false,
+  });
   const consoleEndRef = useRef<HTMLDivElement | null>(null);
 
   const loadCatalogAndStatus = async () => {
@@ -190,6 +211,8 @@ export const InternalADPanel: React.FC<InternalADPanelProps> = ({
         active_authorized: responderActiveAuthorized,
         interface: ifaceObj.name,
         bind_ip: ifaceObj.ip,
+        protocols: responderProtocols,
+        options: responderOptions,
       });
       setResponderStatus(st);
       showToast(L('Responder listener started.', 'Listener Responder avviato.'), 'success');
@@ -411,6 +434,127 @@ export const InternalADPanel: React.FC<InternalADPanelProps> = ({
             </label>
           </div>
         )}
+
+        {/* Collapsible Protocol & Responder.conf Configuration Dropdown */}
+        <div className="border-t border-theme-subtle pt-2.5">
+          <button
+            type="button"
+            onClick={() => setShowResponderConfig((prev) => !prev)}
+            className="w-full flex items-center justify-between px-2.5 py-1.5 rounded bg-subtle border border-theme text-[11px] font-mono text-theme-primary hover:border-theme-accent transition"
+          >
+            <span className="flex items-center space-x-2">
+              <Sliders className="w-3.5 h-3.5 text-theme-accent" />
+              <span>{L('Protocol & Responder.conf Settings', 'Configurazione Protocolli & Responder.conf')}</span>
+              <span className="px-1.5 py-0.5 rounded bg-panel border border-theme text-[10px] text-theme-accent">
+                {Object.values(responderProtocols).filter(Boolean).length}/{Object.keys(responderProtocols).length} ON
+              </span>
+            </span>
+            <ChevronDown className={`w-3.5 h-3.5 text-theme-muted transition-transform ${showResponderConfig ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showResponderConfig && (
+            <div className={`mt-2 p-3 rounded bg-subtle border border-theme space-y-3 ${responderStatus?.running ? 'opacity-60 pointer-events-none' : ''}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10px] font-mono uppercase text-theme-muted">
+                  {L('Quick Presets:', 'Preset Rapidi:')}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResponderProtocols({ llmnr: true, nbns: true, mdns: true, smb: true, http: true, https: true, ldap: true, sql: true, ftp: true, dns: true });
+                      setResponderOptions({ wpad: false, force_wpad_auth: false, basic_auth: false, dhcp: false });
+                    }}
+                    className="px-2 py-0.5 rounded border border-theme bg-panel text-[10px] font-mono text-theme-secondary hover:border-theme-accent"
+                  >
+                    {L('All Default', 'Tutti Attivi')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setResponderProtocols({ llmnr: true, nbns: true, mdns: true, smb: false, http: false, https: true, ldap: true, sql: true, ftp: true, dns: true })}
+                    className="px-2 py-0.5 rounded border border-theme bg-panel text-[10px] font-mono text-amber-300 hover:border-amber-500"
+                  >
+                    {L('Relay-Safe (SMB & HTTP Off)', 'Relay-Safe (SMB & HTTP Off)')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setResponderProtocols({ llmnr: true, nbns: true, mdns: true, smb: false, http: false, https: false, ldap: false, sql: false, ftp: false, dns: false })}
+                    className="px-2 py-0.5 rounded border border-theme bg-panel text-[10px] font-mono text-emerald-300 hover:border-emerald-500"
+                  >
+                    {L('Broadcast Only (LLMNR/NBT-NS/mDNS)', 'Solo Broadcast')}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[10px] font-mono uppercase text-theme-muted mb-1.5">
+                  {L('Protocols & Poison Servers (toggle to disable selectively)', 'Protocolli & Server (deseleziona per disabilitare)')}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { key: 'llmnr', label: 'LLMNR (:5355)' },
+                    { key: 'nbns', label: 'NBT-NS (:137)' },
+                    { key: 'mdns', label: 'mDNS (:5353)' },
+                    { key: 'smb', label: 'SMB (:445)' },
+                    { key: 'http', label: 'HTTP (:80)' },
+                    { key: 'https', label: 'HTTPS (:443)' },
+                    { key: 'ldap', label: 'LDAP (:389)' },
+                    { key: 'sql', label: 'MSSQL (:1433)' },
+                    { key: 'ftp', label: 'FTP (:21)' },
+                    { key: 'dns', label: 'DNS (:53)' },
+                  ].map((item) => {
+                    const active = Boolean(responderProtocols[item.key]);
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        onClick={() =>
+                          setResponderProtocols((prev) => ({ ...prev, [item.key]: !prev[item.key] }))
+                        }
+                        className={`px-2 py-1 rounded border text-[11px] font-mono transition ${
+                          active
+                            ? 'row-selected-theme border-theme-accent text-theme-accent font-semibold'
+                            : 'bg-panel border-theme text-theme-muted line-through opacity-70'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[10px] font-mono uppercase text-theme-muted mb-1.5">
+                  {L('Active Responder CLI / Conf Flags', 'Flag Responder Active / Conf')}
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { key: 'wpad', label: 'WPAD Server (-w)' },
+                    { key: 'force_wpad_auth', label: 'Force WPAD Auth (-F)' },
+                    { key: 'basic_auth', label: 'Basic Auth (-b)' },
+                    { key: 'dhcp', label: 'DHCP Spoof (-d)' },
+                  ].map((opt) => (
+                    <label
+                      key={opt.key}
+                      className="flex items-center space-x-2 text-[11px] font-mono text-theme-secondary cursor-pointer p-1.5 rounded bg-panel border border-theme"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(responderOptions[opt.key])}
+                        onChange={(e) =>
+                          setResponderOptions((prev) => ({ ...prev, [opt.key]: e.target.checked }))
+                        }
+                        className="rounded"
+                      />
+                      <span>{opt.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         {(responderStatus?.running || (responderStatus?.logs?.length ?? 0) > 0) && (
           <div className="rounded bg-slate-950/90 border border-theme p-3 font-mono text-[11px] max-h-52 overflow-y-auto space-y-1">

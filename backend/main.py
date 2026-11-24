@@ -348,6 +348,8 @@ class ResponderStartModel(BaseModel):
     active_authorized: bool = False
     interface: str = "all"
     bind_ip: str = "0.0.0.0"
+    protocols: Optional[Dict[str, bool]] = None
+    options: Optional[Dict[str, bool]] = None
 
 
 class ProbeHeartbeatModel(BaseModel):
@@ -716,6 +718,8 @@ async def start_responder_endpoint(payload: ResponderStartModel):
             active_authorized=payload.active_authorized,
             interface=payload.interface,
             bind_ip=payload.bind_ip,
+            protocols=payload.protocols,
+            options=payload.options,
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))

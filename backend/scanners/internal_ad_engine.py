@@ -782,12 +782,34 @@ def analyze_azurehound_json(
 # OS Network Interfaces & Standalone Decoupled Responder Session Manager
 # ---------------------------------------------------------------------
 
+DEFAULT_RESPONDER_PROTOCOLS: Dict[str, bool] = {
+    "llmnr": True,
+    "nbns": True,
+    "mdns": True,
+    "smb": True,
+    "http": True,
+    "https": True,
+    "ldap": True,
+    "sql": True,
+    "ftp": True,
+    "dns": True,
+}
+
+DEFAULT_RESPONDER_OPTIONS: Dict[str, bool] = {
+    "wpad": False,
+    "force_wpad_auth": False,
+    "basic_auth": False,
+    "dhcp": False,
+}
+
 _RESPONDER_LOCK = threading.Lock()
 _RESPONDER_STATE: Dict[str, Any] = {
     "running": False,
     "mode": "passive",
     "interface": "all",
     "bind_ip": "0.0.0.0",
+    "protocols": dict(DEFAULT_RESPONDER_PROTOCOLS),
+    "options": dict(DEFAULT_RESPONDER_OPTIONS),
     "started_at": "",
     "started_ts": 0.0,
     "hosts_seen": [],
@@ -878,6 +900,8 @@ def get_responder_session_status() -> Dict[str, Any]:
             "mode": _RESPONDER_STATE["mode"],
             "interface": _RESPONDER_STATE["interface"],
             "bind_ip": _RESPONDER_STATE["bind_ip"],
+            "protocols": dict(_RESPONDER_STATE["protocols"]),
+            "options": dict(_RESPONDER_STATE["options"]),
             "started_at": _RESPONDER_STATE["started_at"],
             "elapsed_sec": elapsed,
             "hosts_seen": list(_RESPONDER_STATE["hosts_seen"]),
@@ -893,6 +917,8 @@ def start_responder_session(
     active_authorized: bool = False,
     interface: str = "all",
     bind_ip: str = "0.0.0.0",
+    protocols: Optional[Dict[str, bool]] = None,
+    options: Optional[Dict[str, bool]] = None,
 ) -> Dict[str, Any]:
     """Start standalone live Responder / passive UDP broadcast listener independently of scans."""
     m = (mode or "passive").strip().lower()
@@ -900,6 +926,21 @@ def start_responder_session(
         raise ValueError("Modalità Responder non valida (usa 'passive' o 'active').")
     if m == "active" and not active_authorized:
         raise ValueError("Responder Active Mode richiede l'esplicita conferma di autorizzazione del cliente.")
+
+    merged_protos = dict(DEFAULT_RESPONDER_PROTOCOLS)
+    if isinstance(protocols, dict):
+        for k in DEFAULT_RESPONDER_PROTOCOLS:
+            if k in protocols:
+                merged_protos[k] = bool(protocols[k])
+
+    merged_opts = dict(DEFAULT_RESPONDER_OPTIONS)
+    if isinstance(options, dict):
+        for k in DEFAULT_RESPONDER_OPTIONS:
+            if k in options:
+                merged_opts[k] = bool(options[k])
+
+    if m == "passive" and not any(merged_protos.get(k) for k in ("llmnr", "nbns", "mdns")):
+        raise ValueError("Abilita almeno un protocollo broadcast (LLMNR, NBT-NS o mDNS).")
 
     with _RESPONDER_LOCK:
         if _RESPONDER_STATE["running"]:
@@ -926,6 +967,8 @@ def start_responder_session(
             "mode": m,
             "interface": iface_clean,
             "bind_ip": bind_clean,
+            "protocols": merged_protos,
+            "options": merged_opts,
             "started_at": now_iso,
             "started_ts": time.monotonic(),
             "hosts_seen": [],
@@ -939,13 +982,24 @@ def start_responder_session(
 
     if m == "active" and resp_bin:
         iface_arg = iface_clean if (iface_clean != "all" and _SAFE_ARG_RE.match(iface_clean)) else "eth0"
-        _append_responder_log("WARN", f"[AUTHORIZED ACTIVE] Launching {resp_bin} -I {iface_arg} -wF ...")
+        cli_cmd = [resp_bin, "-I", iface_arg]
+        if merged_opts.get("wpad"):
+            cli_cmd.append("-w")
+        if merged_opts.get("force_wpad_auth"):
+            cli_cmd.append("-F")
+        if merged_opts.get("basic_auth"):
+            cli_cmd.append("-b")
+        if merged_opts.get("dhcp"):
+            cli_cmd.append("-d")
+        proto_summary = ", ".join(f"{k.upper()}={'On' if v else 'Off'}" for k, v in merged_protos.items())
+        _append_responder_log("WARN", f"[AUTHORIZED ACTIVE] Launching {' '.join(cli_cmd)}")
+        _append_responder_log("INFO", f"[Responder.conf Targets] {proto_summary}")
 
         def _active_worker() -> None:
             proc = None
             try:
                 proc = subprocess.Popen(
-                    [resp_bin, "-I", iface_arg, "-wF"],
+                    cli_cmd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -988,19 +1042,26 @@ def start_responder_session(
         threading.Thread(target=_active_worker, daemon=True).start()
         return get_responder_session_status()
 
+    passive_specs = [
+        spec
+        for key, spec in (
+            ("llmnr", (5355, "LLMNR", "224.0.0.252")),
+            ("nbns", (137, "NBT-NS", "")),
+            ("mdns", (5353, "mDNS", "224.0.0.251")),
+        )
+        if merged_protos.get(key)
+    ]
+    disabled_protos = [k.upper() for k, v in merged_protos.items() if not v]
     _append_responder_log(
         "INFO",
-        f"[PASSIVE LISTENER] Binding UDP 5355 (LLMNR), 137 (NBT-NS), 5353 (mDNS) on {iface_clean} ({bind_clean}) — zero packets sent...",
+        f"[PASSIVE LISTENER] Binding {', '.join(f'UDP/{p} ({lbl})' for p, lbl, _ in passive_specs)} on {iface_clean} ({bind_clean}) — zero packets sent..."
+        + (f" | Disabled: {', '.join(disabled_protos)}" if disabled_protos else ""),
     )
 
     def _passive_worker() -> None:
         sock_map: Dict[socket.socket, Tuple[int, str]] = {}
         try:
-            for port, proto_lbl, mcast_ip in (
-                (5355, "LLMNR", "224.0.0.252"),
-                (137, "NBT-NS", ""),
-                (5353, "mDNS", "224.0.0.251"),
-            ):
+            for port, proto_lbl, mcast_ip in passive_specs:
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

@@ -1310,6 +1310,8 @@ export const api = {
     active_authorized: boolean;
     interface: string;
     bind_ip: string;
+    protocols?: Record<string, boolean>;
+    options?: Record<string, boolean>;
   }): Promise<ResponderSessionStatus> {
     const res = await fetch(`${API_BASE}/internal/responder/start`, {
       method: 'POST',

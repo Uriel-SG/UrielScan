@@ -107,6 +107,21 @@ const getProfiles = (L: (en: string, it: string) => string): ProfileTemplate[] =
     nucleiSeverity: ['medium', 'low', 'info'],
     nucleiTags: ['ssl', 'tls'],
     webChecks: ['headers', 'ssl']
+  },
+  {
+    id: 'internal-ad',
+    name: L('Internal & AD Security', 'Internal & AD Security'),
+    description: L(
+      'Internal LAN, Active Directory & Entra ID audit: Responder listener, NetExec modular flags, Enum4linux-ng, BloodHound & AzureHound.',
+      'Audit rete interna LAN, Active Directory & Entra ID: listener Responder, flag modulari NetExec, Enum4linux-ng, BloodHound & AzureHound.'
+    ),
+    engines: ['internal_ad'],
+    ports: '88,135,139,389,445,636,3389,5985',
+    nmapFlags: { '-sV': true, '-sC': true, '-O': false, '-Pn': true, '-T4': true, '-sS': true },
+    nseScripts: ['smb-os-discovery', 'smb2-security-mode', 'ldap-rootdse'],
+    nucleiSeverity: ['critical', 'high', 'medium'],
+    nucleiTags: ['network', 'smb'],
+    webChecks: []
   }
 ];
 
@@ -457,7 +472,7 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       zap: prof.engines.includes('zap'),
       native_web: prof.engines.includes('native_web'),
       native_net: prof.engines.includes('native_net'),
-      internal_ad: false,
+      internal_ad: prof.engines.includes('internal_ad'),
     };
     setEngines(newEngines);
 
@@ -477,6 +492,16 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   };
 
   const toggleEngine = (eng: string) => {
+    if (eng === 'internal_ad' && activeProfile === 'internal-ad' && engines.internal_ad) {
+      showToast(
+        L(
+          'Internal & AD is locked to the active profile; you can still enable extra engines like Nmap.',
+          'Internal & AD è vincolato al profilo attivo; puoi comunque abilitare altri motori come Nmap.'
+        ),
+        'info'
+      );
+      return;
+    }
     setEngines((prev) => ({ ...prev, [eng]: !prev[eng] }));
   };
 
@@ -1041,26 +1066,43 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
             { id: 'native_web', label: 'Native Web OWASP', desc: L('Headers, cookies, secrets, CORS', 'Headers, cookies, secrets, CORS') },
             { id: 'native_net', label: 'Native Network/SSL', desc: L('TLS cipher, certificates & banner', 'Cipher TLS, certificati & banner') },
             { id: 'internal_ad', label: 'Internal & AD', desc: L('Responder, NetExec, Enum4linux, BloodHound/Entra', 'Responder, NetExec, Enum4linux, BloodHound/Entra') },
-          ].map((item) => (
-            <label
-              key={item.id}
-              onClick={() => toggleEngine(item.id)}
-              className={`p-2.5 rounded border flex items-center space-x-2.5 cursor-pointer transition ${
-                engines[item.id] ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel opacity-60'
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={Boolean(engines[item.id])}
-                readOnly
-                className="rounded"
-              />
-              <div className="min-w-0">
-                <div className="text-xs font-bold text-theme-primary truncate">{item.label}</div>
-                <div className="text-[10px] text-theme-muted truncate">{item.desc}</div>
-              </div>
-            </label>
-          ))}
+          ].map((item) => {
+            const isLocked = item.id === 'internal_ad' && activeProfile === 'internal-ad';
+            return (
+              <label
+                key={item.id}
+                onClick={() => toggleEngine(item.id)}
+                title={
+                  isLocked
+                    ? L(
+                        'Locked by Internal & AD Security profile (other engines remain selectable)',
+                        'Vincolato dal profilo Internal & AD Security (altri motori selezionabili)'
+                      )
+                    : undefined
+                }
+                className={`p-2.5 rounded border flex items-center space-x-2.5 transition ${
+                  isLocked ? 'cursor-not-allowed' : 'cursor-pointer'
+                } ${
+                  engines[item.id] ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel opacity-60'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={Boolean(engines[item.id])}
+                  disabled={isLocked}
+                  readOnly
+                  className="rounded"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-theme-primary flex items-center space-x-1 truncate">
+                    <span className="truncate">{item.label}</span>
+                    {isLocked && <Lock className="w-3 h-3 text-theme-accent shrink-0" />}
+                  </div>
+                  <div className="text-[10px] text-theme-muted truncate">{item.desc}</div>
+                </div>
+              </label>
+            );
+          })}
         </div>
       </div>
 

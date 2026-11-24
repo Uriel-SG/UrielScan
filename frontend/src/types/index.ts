@@ -491,6 +491,8 @@ export interface ResponderSessionStatus {
   mode: 'passive' | 'active';
   interface: string;
   bind_ip: string;
+  protocols?: Record<string, boolean>;
+  options?: Record<string, boolean>;
   started_at: string;
   elapsed_sec: number;
   hosts_seen: string[];
