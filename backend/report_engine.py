@@ -47,6 +47,7 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
         or recon.get("directories")
         or recon.get("tech_stack")
         or recon.get("cve_intel")
+        or recon.get("external_osint")
     ):
         return ""
 
@@ -61,6 +62,7 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
     dirs = recon.get("directories") or []
     tech_stack = recon.get("tech_stack") or []
     cve_intel = recon.get("cve_intel") or []
+    external_osint = recon.get("external_osint") or []
     axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
     sources = recon.get("sources") or {}
 
@@ -190,6 +192,38 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
         else ""
     )
 
+    osint_rows_html = ""
+    for eo in external_osint[:20]:
+        asn_meta = " | ".join(str(x) for x in (eo.get("asn"), eo.get("org"), eo.get("prefix")) if x) or "-"
+        ports_str = ", ".join(str(p) for p in (eo.get("ports") or [])[:15]) or "-"
+        cves_tags = ", ".join(
+            ([f"TAG:{t}" for t in (eo.get("tags") or [])[:5]]) + list((eo.get("vulns") or [])[:6])
+        ) or "-"
+        gn_cls = str(eo.get("greynoise_classification") or "unknown").lower()
+        gn_color = "#dc2626" if gn_cls == "malicious" else ("#059669" if (gn_cls == "benign" or eo.get("greynoise_riot")) else "#475569")
+        gn_name = str(eo.get("greynoise_name") or "").strip()
+        gn_label = f"<span style='color:{gn_color};font-weight:bold;'>{_esc(gn_cls.upper())}</span>"
+        if gn_name and gn_name != "not observed":
+            gn_label += f" ({_esc(gn_name)})"
+        osint_rows_html += (
+            f"<tr>"
+            f"<td><code>{_esc(eo.get('ip') or '-')}</code></td>"
+            f"<td>{_esc(asn_meta)}</td>"
+            f"<td><code>{_esc(ports_str)}</code></td>"
+            f"<td><code>{_esc(cves_tags)}</code></td>"
+            f"<td>{gn_label}</td>"
+            f"</tr>"
+        )
+    osint_table = (
+        f"<h4 style='margin:14px 0 6px;font-size:13px;color:#334155;'>"
+        + ("External OSINT Intelligence (Shodan InternetDB / RIPEstat / GreyNoise)")
+        + "</h4><table class='custom-table'><thead><tr>"
+        + "<th>IP</th><th>ASN / Org / Prefix</th><th>Exposed Ports</th><th>Shodan CVEs / Tags</th><th>GreyNoise</th>"
+        + f"</tr></thead><tbody>{osint_rows_html}</tbody></table>"
+        if osint_rows_html
+        else ""
+    )
+
     return f"""
         <h2 class="section-title page-break-before">{_esc(sec_title)}</h2>
         <div class="exec-card" style="margin-bottom:16px;">
@@ -201,6 +235,7 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
                 <span><strong>Directories (Feroxbuster):</strong> {len(dirs)}</span>
                 <span><strong>Tech Stack:</strong> {len(tech_stack)}</span>
                 <span><strong>CVE Intel:</strong> {len(cve_intel)}</span>
+                <span><strong>External OSINT:</strong> {len(external_osint)}</span>
             </div>
             {src_badges}
         </div>
@@ -208,6 +243,7 @@ def _build_recon_html_section(recon: Dict[str, Any], is_it: bool) -> str:
         {sub_table}
         {tech_table}
         {cve_table}
+        {osint_table}
         {dir_table}
     """
 
@@ -266,6 +302,60 @@ def _build_cloud_posture_html_section(cloud_posture: Dict[str, Any], is_it: bool
             </div>
         </div>
         {svc_table}
+    """
+
+
+def _build_internal_ad_html_section(internal_ad: Dict[str, Any], is_it: bool) -> str:
+    """Build bilingual HTML section for Internal LAN, Active Directory & Entra ID Security."""
+    if not isinstance(internal_ad, dict) or not (
+        internal_ad.get("bloodhound")
+        or internal_ad.get("azurehound")
+        or internal_ad.get("enum4linux")
+        or internal_ad.get("lan_broadcast")
+    ):
+        return ""
+    sec_title = (
+        "Sicurezza Rete Interna, Active Directory & Entra ID"
+        if is_it
+        else "Internal Network, Active Directory & Entra ID Security"
+    )
+    bh = internal_ad.get("bloodhound") or {}
+    ah = internal_ad.get("azurehound") or {}
+    e4l = internal_ad.get("enum4linux") or {}
+    lan = internal_ad.get("lan_broadcast") or {}
+
+    cards = []
+    if bh:
+        cards.append(
+            f"<span><strong>BloodHound AD ({_esc(bh.get('domain'))}):</strong> "
+            f"Critical ACLs: {int(bh.get('dangerous_acls') or 0)} | "
+            f"Unconstrained Deleg: {int(bh.get('unconstrained_delegation') or 0)} | "
+            f"Kerberoast Admins: {int(bh.get('kerberoastable_admins') or 0)} | "
+            f"AS-REP: {int(bh.get('asrep_roastable') or 0)}</span>"
+        )
+    if ah:
+        cards.append(
+            f"<span><strong>AzureHound Entra ID:</strong> "
+            f"Global Admins: {int(ah.get('global_admins') or 0)} | "
+            f"Risky Graph Apps: {int(ah.get('risky_graph_apps') or 0)} | "
+            f"Privileged Guests: {int(ah.get('privileged_guests') or 0)}</span>"
+        )
+    if e4l:
+        cards.append(
+            f"<span><strong>Enum4linux-ng:</strong> Open Shares: {len(e4l.get('open_shares') or [])} | Users: {int(e4l.get('users_count') or 0)}</span>"
+        )
+    if lan:
+        cards.append(
+            f"<span><strong>LAN Broadcast ({_esc(lan.get('mode'))}):</strong> Hosts seen: {len(lan.get('hosts_seen') or [])}</span>"
+        )
+
+    return f"""
+        <h2 class="section-title page-break-before">{_esc(sec_title)}</h2>
+        <div class="exec-card" style="margin-bottom:16px;">
+            <div style="font-size:13px;display:flex;flex-direction:column;gap:8px;">
+                {''.join(cards)}
+            </div>
+        </div>
     """
 
 
@@ -960,6 +1050,7 @@ def generate_html_report(
 
         {_build_recon_html_section(summary.get("recon") or {}, is_it)}
         {_build_cloud_posture_html_section(summary.get("cloud_posture") or {}, is_it)}
+        {_build_internal_ad_html_section(summary.get("internal_ad") or {}, is_it)}
 
         <!-- Detailed Technical Dossiers -->
         <h2 class="section-title page-break-before">{sec4_title}</h2>

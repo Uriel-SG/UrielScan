@@ -155,6 +155,7 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
   const [dirTimeLimit, setDirTimeLimit] = useState<string>('180');
   const [enableTechFingerprint, setEnableTechFingerprint] = useState<boolean>(true);
   const [enableCveIntel, setEnableCveIntel] = useState<boolean>(true);
+  const [enableExternalOsint, setEnableExternalOsint] = useState<boolean>(true);
 
   const clampIntStr = (raw: string, min: number, max: number, fallback: number): number => {
     const parsed = parseInt(raw, 10);
@@ -591,6 +592,7 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       dir_time_limit: enableDirEnum ? clampIntStr(dirTimeLimit, 30, 600, 180) : undefined,
       enable_tech_fingerprint: enableTechFingerprint,
       enable_cve_intel: enableTechFingerprint ? enableCveIntel : false,
+      enable_external_osint: enableExternalOsint,
       config: {
         ports: portSelection === 'custom' ? customPorts : portSelection,
         nmap_flags: activeFlagsString,
@@ -1705,6 +1707,28 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
                 checked={enableTechFingerprint && enableCveIntel}
                 disabled={!enableTechFingerprint}
                 onChange={(e) => setEnableCveIntel(e.target.checked)}
+                className="mt-0.5 rounded"
+              />
+            </label>
+          </div>
+
+          <div className={`p-3 rounded border transition ${enableExternalOsint ? 'border-theme-accent bg-subtle' : 'border-theme bg-panel'}`}>
+            <label className="flex items-start justify-between gap-3 cursor-pointer">
+              <div>
+                <div className="text-xs font-bold text-theme-primary">
+                  {L('External OSINT (Shodan InternetDB + RIPEstat + GreyNoise)', 'OSINT Esterno (Shodan InternetDB + RIPEstat + GreyNoise)')}
+                </div>
+                <div className="text-[11px] text-theme-secondary mt-0.5">
+                  {L(
+                    'Passive public IP enrichment: exposed ports, ASN/Org, Shodan CVEs/tags & GreyNoise reputation (free, zero API keys, skipped on LAN/RFC1918).',
+                    'Arricchimento passivo su IP pubblici: porte esposte, ASN/Org, CVE/tag Shodan e reputazione GreyNoise (gratuito, senza API key, saltato su LAN/RFC1918).'
+                  )}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableExternalOsint}
+                onChange={(e) => setEnableExternalOsint(e.target.checked)}
                 className="mt-0.5 rounded"
               />
             </label>

@@ -62,6 +62,16 @@ from backend.scanners.prowler_engine import (
     mask_cloud_credentials,
     start_cloud_scan_in_background,
 )
+from backend.scanners.internal_ad_engine import (
+    NETEXEC_PROTOCOLS,
+    NETEXEC_CHECKS,
+    detect_internal_tools,
+    install_internal_tool,
+    analyze_bloodhound_archive,
+    analyze_azurehound_json,
+    start_internal_ad_scan_in_background,
+    EXPORTS_DIR as INTERNAL_EXPORTS_DIR,
+)
 from backend.scanners.tor_engine import (
     detect_tor,
     install_tor,
@@ -265,6 +275,7 @@ class ScanCreateModel(BaseModel):
     dir_time_limit: Optional[int] = 180
     enable_tech_fingerprint: Optional[bool] = True
     enable_cve_intel: Optional[bool] = True
+    enable_external_osint: Optional[bool] = True
 
 
 class ProxyTestRequest(BaseModel):
@@ -302,6 +313,29 @@ class CloudScanCreateModel(BaseModel):
     compliance: Optional[str] = ""
     services: Optional[List[str]] = None
     severities: Optional[List[str]] = None
+
+
+class InternalADScanCreateModel(BaseModel):
+    org_id: int | str
+    name: str = Field(..., min_length=1, max_length=160)
+    targets: str = Field("", max_length=500)
+    domain: Optional[str] = ""
+    username: Optional[str] = ""
+    password: Optional[str] = ""
+    enable_netexec: bool = True
+    netexec_protocols: List[str] = Field(default_factory=lambda: ["smb", "ldap"])
+    netexec_checks: List[str] = Field(default_factory=lambda: ["smb_signing", "smbv1", "null_shares", "ldap_anon"])
+    enable_enum4linux: bool = False
+    enable_bloodhound: bool = False
+    enable_azurehound: bool = False
+    azure_tenant_id: Optional[str] = ""
+    azure_client_id: Optional[str] = ""
+    azure_client_secret: Optional[str] = ""
+    enable_responder: bool = False
+    responder_mode: str = "passive"
+    responder_active_authorized: bool = False
+    responder_duration_sec: int = 30
+    responder_interface: Optional[str] = ""
 
 
 class ProbeHeartbeatModel(BaseModel):
@@ -641,6 +675,184 @@ async def create_cloud_scan_endpoint(payload: CloudScanCreateModel):
         },
     )
     return get_scan_by_id(scan_id)
+
+
+@app.get("/api/internal/catalog")
+async def get_internal_catalog_endpoint():
+    return {
+        "tools": detect_internal_tools(),
+        "netexec_protocols": NETEXEC_PROTOCOLS,
+        "netexec_checks": NETEXEC_CHECKS,
+    }
+
+
+@app.post("/api/internal/install/{tool_name}")
+async def install_internal_tool_endpoint(tool_name: str):
+    if tool_name.lower() not in ("netexec", "bloodhound", "azurehound", "enum4linux_ng"):
+        raise HTTPException(status_code=400, detail="Tool Internal/AD non supportato per l'installazione.")
+    return await install_internal_tool(tool_name.lower())
+
+
+@app.post("/api/internal/scans", status_code=201)
+async def create_internal_ad_scan_endpoint(payload: InternalADScanCreateModel):
+    oid = _parse_int_id(payload.org_id)
+    org = get_organization_by_id(oid)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organizzazione non trovata.")
+
+    if payload.enable_responder and payload.responder_mode.strip().lower() == "active" and not payload.responder_active_authorized:
+        raise HTTPException(
+            status_code=400,
+            detail="Responder Active Mode richiede l'esplicita conferma di autorizzazione del cliente.",
+        )
+
+    engines_used = []
+    if payload.enable_netexec:
+        engines_used.append("netexec")
+    if payload.enable_enum4linux:
+        engines_used.append("enum4linux_ng")
+    if payload.enable_bloodhound:
+        engines_used.append("bloodhound")
+    if payload.enable_azurehound:
+        engines_used.append("azurehound")
+    if payload.enable_responder:
+        engines_used.append("responder")
+    if not engines_used:
+        engines_used.append("internal_ad")
+
+    cfg = {
+        "domain": payload.domain or "",
+        "enable_netexec": payload.enable_netexec,
+        "netexec_protocols": payload.netexec_protocols,
+        "netexec_checks": payload.netexec_checks,
+        "enable_enum4linux": payload.enable_enum4linux,
+        "enable_bloodhound": payload.enable_bloodhound,
+        "enable_azurehound": payload.enable_azurehound,
+        "enable_responder": payload.enable_responder,
+        "responder_mode": payload.responder_mode,
+        "responder_active_authorized": payload.responder_active_authorized,
+        "responder_duration_sec": payload.responder_duration_sec,
+    }
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO scans (org_id, name, targets, scan_profile, engines_json, config_json, status, progress, current_task, started_at)
+            VALUES (?, ?, ?, 'Internal & AD Security', ?, ?, 'running', 0, 'Inizializzazione audit Internal & AD...', ?);
+            """,
+            (oid, payload.name.strip(), payload.targets or payload.domain or "Internal LAN", json.dumps(engines_used), json.dumps(cfg), now_iso),
+        )
+        scan_id = cur.lastrowid
+    conn.close()
+
+    start_internal_ad_scan_in_background(scan_id, payload.model_dump())
+    return get_scan_by_id(scan_id)
+
+
+@app.post("/api/internal/analyze-upload", status_code=201)
+async def analyze_internal_identity_upload_endpoint(
+    org_id: str = Form(...),
+    name: str = Form("Identity Graph Analysis"),
+    kind: str = Form("auto"),
+    file: UploadFile = File(...),
+):
+    oid = _parse_int_id(org_id)
+    org = get_organization_by_id(oid)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organizzazione non trovata.")
+
+    raw_bytes = await file.read()
+    if not raw_bytes or len(raw_bytes) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File vuoto o superiore al limite di 50 MB.")
+
+    fname = file.filename or "upload.json"
+    detected_kind = (kind or "auto").strip().lower()
+    if detected_kind == "auto":
+        detected_kind = "azurehound" if ("azurehound" in fname.lower() or b"AZTenant" in raw_bytes[:5000] or b"AZRoleAssignment" in raw_bytes[:5000]) else "bloodhound"
+
+    if detected_kind == "azurehound":
+        entra_sum, findings = analyze_azurehound_json(raw_bytes, fname)
+        internal_summary: Dict[str, Any] = {"azurehound": entra_sum, "export_available": True}
+        eng_tag = ["azurehound"]
+        target_lbl = f"Entra ID ({entra_sum.get('tenant', 'Upload')})"
+    else:
+        ad_sum, findings = analyze_bloodhound_archive(raw_bytes, fname)
+        internal_summary = {"bloodhound": ad_sum, "export_available": True}
+        eng_tag = ["bloodhound"]
+        target_lbl = f"AD ({ad_sum.get('domain', 'Upload')})"
+
+    crit = sum(1 for f in findings if f["severity"] == "critical")
+    high = sum(1 for f in findings if f["severity"] == "high")
+    med = sum(1 for f in findings if f["severity"] == "medium")
+    low = sum(1 for f in findings if f["severity"] == "low")
+    info = sum(1 for f in findings if f["severity"] == "info")
+    risk_score = min(100, int((crit * 25) + (high * 15) + (med * 5) + (low * 2)))
+    risk_label = "CRITICO" if risk_score >= 75 else ("ALTO" if risk_score >= 50 else ("MEDIO" if risk_score >= 25 else "BASSO"))
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    summary = {
+        "total_hosts": 1, "up_hosts": 1, "total_ports": 0,
+        "total_findings": len(findings),
+        "critical": crit, "high": high, "medium": med, "low": low, "info": info,
+        "risk_score": risk_score, "risk_label": risk_label,
+        "engines_used": eng_tag,
+        "internal_ad": internal_summary,
+    }
+    conn = get_db_connection()
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO scans (org_id, name, targets, scan_profile, engines_json, config_json, status, progress, current_task, started_at, completed_at, hosts_json, summary_json)
+            VALUES (?, ?, ?, 'Internal & AD Security (Upload)', ?, ?, 'completed', 100, 'Analisi grafo completata', ?, ?, '[]', ?);
+            """,
+            (oid, name.strip(), target_lbl, json.dumps(eng_tag), json.dumps({"upload_kind": detected_kind, "filename": fname}), now_iso, now_iso, json.dumps(summary)),
+        )
+        scan_id = cur.lastrowid
+        for f in findings:
+            conn.execute(
+                """
+                INSERT INTO findings (
+                    scan_id, org_id, host, port, protocol, service,
+                    title, severity, cvss, cve_ids, cwe_id, source_engine,
+                    description, evidence, remediation, mitre_tactic, mitre_technique,
+                    ai_insight, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, '', 'open', ?);
+                """,
+                (
+                    scan_id, oid, f.get("host", ""), int(f.get("port") or 0),
+                    f.get("protocol", "tcp"), f.get("service", ""), f.get("title", ""),
+                    f.get("severity", "info"), float(f.get("cvss") or 0.0), f.get("cwe_id", ""),
+                    f.get("source_engine", detected_kind), f.get("description", ""),
+                    f.get("evidence", ""), f.get("remediation", ""),
+                    f.get("mitre_tactic", "Privilege Escalation"), f.get("mitre_technique", ""), now_iso,
+                ),
+            )
+    conn.close()
+
+    INTERNAL_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    export_zip = INTERNAL_EXPORTS_DIR / f"scan_{scan_id}.zip"
+    if fname.lower().endswith(".zip") or raw_bytes[:2] == b"PK":
+        export_zip.write_bytes(raw_bytes)
+    else:
+        import zipfile
+        with zipfile.ZipFile(export_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(fname, raw_bytes)
+
+    return get_scan_by_id(scan_id)
+
+
+@app.get("/api/internal/exports/{scan_id}")
+async def download_internal_export_endpoint(scan_id: str):
+    sid = _parse_int_id(scan_id)
+    zpath = INTERNAL_EXPORTS_DIR / f"scan_{sid}.zip"
+    if not zpath.is_file():
+        raise HTTPException(status_code=404, detail="Archivio export BloodHound/AzureHound non trovato per questa scansione.")
+    return Response(
+        content=zpath.read_bytes(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="urielscan_ad_scan_{sid}.zip"'},
+    )
 
 
 @app.get("/api/wordlists")
@@ -1181,6 +1393,8 @@ async def create_and_start_scan(payload: ScanCreateModel):
         cfg["enable_tech_fingerprint"] = bool(payload.enable_tech_fingerprint)
     if payload.enable_cve_intel is not None:
         cfg["enable_cve_intel"] = bool(payload.enable_cve_intel)
+    if payload.enable_external_osint is not None:
+        cfg["enable_external_osint"] = bool(payload.enable_external_osint)
 
     profile = payload.scan_type or payload.scan_profile or "standard"
 
@@ -1348,6 +1562,7 @@ async def export_scan_results(
         export_class = "ESPORTAZIONE RISULTATI SCANSIONE" if is_it else "SCAN RESULTS EXPORT"
         single_recon = (scans_meta[0].get("summary") or {}).get("recon") if len(scans_meta) == 1 else None
         single_cloud = (scans_meta[0].get("summary") or {}).get("cloud_posture") if len(scans_meta) == 1 else None
+        single_internal = (scans_meta[0].get("summary") or {}).get("internal_ad") if len(scans_meta) == 1 else None
         data = generate_pdf_document(
             report_title=title,
             classification=export_class,
@@ -1365,6 +1580,7 @@ async def export_scan_results(
             lang=lang,
             recon_summary=single_recon,
             cloud_posture=single_cloud,
+            internal_ad=single_internal,
         )
         media_type = "application/pdf"
         filename = f"urielscan_{safe_slug}.pdf"
@@ -1643,6 +1859,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
     saved_report_id = ""
     scan_recon_summary = (scan.get("summary") or {}).get("recon")
     scan_cloud_posture = (scan.get("summary") or {}).get("cloud_posture")
+    scan_internal_ad = (scan.get("summary") or {}).get("internal_ad")
     if fmt == "pdf":
         data = generate_pdf_document(
             report_title=title,
@@ -1660,6 +1877,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             lang=lang,
             recon_summary=scan_recon_summary,
             cloud_posture=scan_cloud_posture,
+            internal_ad=scan_internal_ad,
         )
         media_type = "application/pdf"
         filename = f"urielscan_report_scan_{sid}.pdf"
@@ -1680,6 +1898,7 @@ async def export_custom_report_endpoint(req: ReportExportRequest):
             lang=lang,
             recon_summary=scan_recon_summary,
             cloud_posture=scan_cloud_posture,
+            internal_ad=scan_internal_ad,
         )
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         filename = f"urielscan_report_scan_{sid}.docx"

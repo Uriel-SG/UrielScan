@@ -3,6 +3,7 @@ import {
   LayoutDashboard,
   Crosshair,
   Cloud,
+  Network,
   Radar,
   Sparkles,
   FileText,
@@ -17,6 +18,7 @@ export type ViewType =
   | 'dashboard' 
   | 'new-scan' 
   | 'cloud-security'
+  | 'internal-ad'
   | 'scans' 
   | 'ai-hub' 
   | 'reports' 
@@ -76,6 +78,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       sublabel: L('Prowler CSPM & Compliance', 'Prowler CSPM & Compliance'),
       icon: Cloud,
       badge: 'Prowler',
+    },
+    {
+      id: 'internal-ad' as ViewType,
+      label: L('Internal & AD', 'Internal & AD'),
+      sublabel: L('NetExec, BloodHound & LAN', 'NetExec, BloodHound & LAN'),
+      icon: Network,
+      badge: 'AD/LAN',
     },
     {
       id: 'scans' as ViewType,

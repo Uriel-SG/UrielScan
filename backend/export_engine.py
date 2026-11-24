@@ -311,6 +311,7 @@ def generate_pdf_document(
     lang: str = "en",
     recon_summary: Optional[Dict[str, Any]] = None,
     cloud_posture: Optional[Dict[str, Any]] = None,
+    internal_ad: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Generates a structured, printable A4 PDF report/export using ReportLab."""
     findings = sort_findings_by_severity(findings)
@@ -532,6 +533,7 @@ def generate_pdf_document(
         or recon_summary.get("directories")
         or recon_summary.get("tech_stack")
         or recon_summary.get("cve_intel")
+        or recon_summary.get("external_osint")
     ):
         r_title = "Superficie d'Attacco, Stack Tecnologico & CVE/PoC Intel" if is_it else "Attack Surface, Tech Stack & CVE/PoC Intelligence"
         story.append(Paragraph(r_title, h2_style))
@@ -541,6 +543,7 @@ def generate_pdf_document(
         dns_zones = recon_summary.get("dns_zones") or []
         tech_stack = recon_summary.get("tech_stack") or []
         cve_intel = recon_summary.get("cve_intel") or []
+        external_osint = recon_summary.get("external_osint") or []
         axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
         story.append(
             Paragraph(
@@ -550,7 +553,8 @@ def generate_pdf_document(
                 f"AXFR Open: <b>{axfr_open}</b> | "
                 f"Directories: <b>{len(dirs)}</b> | "
                 f"Tech Stack: <b>{len(tech_stack)}</b> | "
-                f"CVE Intel: <b>{len(cve_intel)}</b>",
+                f"CVE Intel: <b>{len(cve_intel)}</b> | "
+                f"External OSINT: <b>{len(external_osint)}</b>",
                 body_style,
             )
         )
@@ -649,6 +653,37 @@ def generate_pdf_document(
             ]))
             story.append(ct)
             story.append(Spacer(1, 4 * mm))
+        if external_osint:
+            eo_rows = [["IP", "ASN / Org", "Ports", "CVEs / Tags", "GreyNoise"]]
+            for eo in external_osint[:20]:
+                asn_meta = " | ".join(str(x) for x in (eo.get("asn"), eo.get("org"), eo.get("prefix")) if x) or "-"
+                ports_str = ", ".join(str(p) for p in (eo.get("ports") or [])[:12]) or "-"
+                cves_tags = ", ".join(
+                    ([f"TAG:{t}" for t in (eo.get("tags") or [])[:4]]) + list((eo.get("vulns") or [])[:5])
+                ) or "-"
+                gn_str = str(eo.get("greynoise_classification") or "unknown").upper()
+                if eo.get("greynoise_name") and eo.get("greynoise_name") != "not observed":
+                    gn_str += f" ({eo.get('greynoise_name')})"
+                eo_rows.append([
+                    str(eo.get("ip") or "-"),
+                    Paragraph(_safe_para_text(asn_meta[:70]), small_muted),
+                    Paragraph(_safe_para_text(ports_str[:40]), small_muted),
+                    Paragraph(_safe_para_text(cves_tags[:80]), small_muted),
+                    Paragraph(_safe_para_text(gn_str[:45]), small_muted),
+                ])
+            et = Table(eo_rows, colWidths=[30 * mm, 48 * mm, 24 * mm, 46 * mm, 32 * mm], repeatRows=1)
+            et.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f766e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(et)
+            story.append(Spacer(1, 4 * mm))
 
     if isinstance(cloud_posture, dict) and cloud_posture.get("provider"):
         story.append(Paragraph("Cloud Security Posture (Prowler CSPM)", h2_style))
@@ -681,6 +716,36 @@ def generate_pdf_document(
             ]))
             story.append(pt)
             story.append(Spacer(1, 4 * mm))
+
+    if isinstance(internal_ad, dict) and (
+        internal_ad.get("bloodhound") or internal_ad.get("azurehound") or internal_ad.get("enum4linux") or internal_ad.get("lan_broadcast")
+    ):
+        story.append(Paragraph("Internal Network, Active Directory & Entra ID Security", h2_style))
+        iad_rows = [["Module", "Summary Metrics"]]
+        bh = internal_ad.get("bloodhound") or {}
+        if bh:
+            iad_rows.append(["BloodHound AD", f"Domain: {bh.get('domain')} | Critical ACLs: {bh.get('dangerous_acls', 0)} | Unconstrained: {bh.get('unconstrained_delegation', 0)} | Kerberoast: {bh.get('kerberoastable_admins', 0)}"])
+        ah = internal_ad.get("azurehound") or {}
+        if ah:
+            iad_rows.append(["AzureHound Entra ID", f"Global Admins: {ah.get('global_admins', 0)} | Risky Graph Apps: {ah.get('risky_graph_apps', 0)} | Priv Guests: {ah.get('privileged_guests', 0)}"])
+        e4l = internal_ad.get("enum4linux") or {}
+        if e4l:
+            iad_rows.append(["Enum4linux-ng", f"Open Shares: {len(e4l.get('open_shares') or [])} | Users: {e4l.get('users_count', 0)}"])
+        lan = internal_ad.get("lan_broadcast") or {}
+        if lan:
+            iad_rows.append([f"LAN Broadcast ({lan.get('mode', 'passive')})", f"Hosts detected: {len(lan.get('hosts_seen') or [])}"])
+        itbl = Table(iad_rows, colWidths=[50 * mm, 130 * mm], repeatRows=1)
+        itbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(itbl)
+        story.append(Spacer(1, 4 * mm))
 
     # Findings Detail
     story.append(Paragraph(
@@ -749,6 +814,7 @@ def generate_docx_report(
     lang: str = "en",
     recon_summary: Optional[Dict[str, Any]] = None,
     cloud_posture: Optional[Dict[str, Any]] = None,
+    internal_ad: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Generates an editable OpenXML (.docx) report compatible with Microsoft Word,
@@ -964,6 +1030,7 @@ def generate_docx_report(
         or recon_summary.get("directories")
         or recon_summary.get("tech_stack")
         or recon_summary.get("cve_intel")
+        or recon_summary.get("external_osint")
     ):
         body_parts.append(heading_xml(
             "Superficie d'Attacco, Stack Tecnologico & CVE/PoC Intel"
@@ -976,12 +1043,14 @@ def generate_docx_report(
         dirs = recon_summary.get("directories") or []
         tech_stack = recon_summary.get("tech_stack") or []
         cve_intel = recon_summary.get("cve_intel") or []
+        external_osint = recon_summary.get("external_osint") or []
         axfr_open = sum(1 for z in dns_zones if z.get("axfr_vulnerable"))
         body_parts.append(p_xml(
             f"Subdomains: {int(recon_summary.get('total_subdomains') or 0)} | "
             f"Live HTTP/S: {len(live_subs)} | Takeovers: {len(takeovers)} | "
             f"AXFR Open: {axfr_open} | Directories: {len(dirs)} | "
-            f"Tech Stack: {len(tech_stack)} | CVE Intel: {len(cve_intel)}",
+            f"Tech Stack: {len(tech_stack)} | CVE Intel: {len(cve_intel)} | "
+            f"External OSINT: {len(external_osint)}",
             bold=True,
         ))
         if live_subs:
@@ -1028,6 +1097,25 @@ def generate_docx_report(
                     pocs,
                 ])
             body_parts.append(table_xml(ci_rows))
+        if external_osint:
+            eo_rows = [["IP", "ASN / Org / Prefix", "Exposed Ports", "Shodan CVEs / Tags", "GreyNoise"]]
+            for eo in external_osint[:20]:
+                asn_meta = " | ".join(str(x) for x in (eo.get("asn"), eo.get("org"), eo.get("prefix")) if x) or "-"
+                ports_str = ", ".join(str(p) for p in (eo.get("ports") or [])[:15]) or "-"
+                cves_tags = ", ".join(
+                    ([f"TAG:{t}" for t in (eo.get("tags") or [])[:5]]) + list((eo.get("vulns") or [])[:6])
+                ) or "-"
+                gn_str = str(eo.get("greynoise_classification") or "unknown").upper()
+                if eo.get("greynoise_name") and eo.get("greynoise_name") != "not observed":
+                    gn_str += f" ({eo.get('greynoise_name')})"
+                eo_rows.append([
+                    str(eo.get("ip") or "-"),
+                    asn_meta,
+                    ports_str,
+                    cves_tags,
+                    gn_str,
+                ])
+            body_parts.append(table_xml(eo_rows))
         body_parts.append(p_xml("", space_after=120))
 
     if isinstance(cloud_posture, dict) and cloud_posture.get("provider"):
@@ -1047,6 +1135,26 @@ def generate_docx_report(
                 if isinstance(cnt, dict):
                     cp_rows.append([str(sname), str(int(cnt.get("passed", 0))), str(int(cnt.get("failed", 0))), str(int(cnt.get("manual", 0)))])
             body_parts.append(table_xml(cp_rows))
+        body_parts.append(p_xml("", space_after=120))
+
+    if isinstance(internal_ad, dict) and (
+        internal_ad.get("bloodhound") or internal_ad.get("azurehound") or internal_ad.get("enum4linux") or internal_ad.get("lan_broadcast")
+    ):
+        body_parts.append(heading_xml("Internal Network, Active Directory & Entra ID Security", level=2))
+        iad_rows = [["Module", "Summary Metrics"]]
+        bh = internal_ad.get("bloodhound") or {}
+        if bh:
+            iad_rows.append(["BloodHound AD", f"Domain: {bh.get('domain')} | Critical ACLs: {bh.get('dangerous_acls', 0)} | Unconstrained: {bh.get('unconstrained_delegation', 0)} | Kerberoast: {bh.get('kerberoastable_admins', 0)}"])
+        ah = internal_ad.get("azurehound") or {}
+        if ah:
+            iad_rows.append(["AzureHound Entra ID", f"Global Admins: {ah.get('global_admins', 0)} | Risky Graph Apps: {ah.get('risky_graph_apps', 0)} | Priv Guests: {ah.get('privileged_guests', 0)}"])
+        e4l = internal_ad.get("enum4linux") or {}
+        if e4l:
+            iad_rows.append(["Enum4linux-ng", f"Open Shares: {len(e4l.get('open_shares') or [])} | Users: {e4l.get('users_count', 0)}"])
+        lan = internal_ad.get("lan_broadcast") or {}
+        if lan:
+            iad_rows.append([f"LAN Broadcast ({lan.get('mode', 'passive')})", f"Hosts detected: {len(lan.get('hosts_seen') or [])}"])
+        body_parts.append(table_xml(iad_rows))
         body_parts.append(p_xml("", space_after=120))
 
     # Section 4: Findings

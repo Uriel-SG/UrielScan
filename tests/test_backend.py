@@ -1994,3 +1994,291 @@ def test_cloud_security_prowler_profiles_ocsf_and_reports(monkeypatch):
     # 5. Cleanup profile
     del_resp = client.delete(f"/api/cloud/profiles/{prof['id']}")
     assert del_resp.status_code == 200
+
+
+def test_internal_ad_netexec_enum4linux_bloodhound_azurehound_responder(monkeypatch):
+    import asyncio
+    import io
+    import json
+    import zipfile
+    import backend.main as main_mod
+    from backend.export_engine import generate_docx_report, generate_pdf_document
+    from backend.report_engine import generate_html_report
+    from backend.scanners import internal_ad_engine
+
+    # 1. NetExec parser
+    nxc_out = "\n".join([
+        "SMB  192.168.10.12  445  WS01  [*] Windows 10 (name:WS01) (signing:False) (SMBv1:True)",
+        "SMB  192.168.10.12  445  WS01  FINANCE  READ,WRITE  Exposed Share",
+        "LDAP 192.168.10.5   389  DC01  [+] Found ADCS ESC1 vulnerable template",
+    ])
+    nxc_findings = internal_ad_engine.parse_netexec_output(nxc_out, "192.168.10.0/24", "smb")
+    titles = " | ".join(f["title"] for f in nxc_findings)
+    assert "SMB Signing Disabilitato" in titles
+    assert "SMBv1 Abilitato" in titles
+    assert "WRITE" in titles
+    assert "ADCS" in titles
+
+    # 2. Enum4linux-ng JSON parser
+    e4l_json = json.dumps({
+        "shares": {
+            "IPC$": {"read": True},
+            "BACKUPS": {"read": True, "write": True},
+        },
+        "users": {"guest": {}, "backup_svc": {}},
+        "password_policy": {"min_pw_length": 6, "lockout_threshold": 0},
+    })
+    e4l_sum, e4l_findings = internal_ad_engine.parse_enum4linux_ng_json(e4l_json, "192.168.10.12")
+    assert e4l_sum["open_shares"] == ["BACKUPS"]
+    assert e4l_sum["users_count"] == 2
+    assert len(e4l_findings) == 3
+
+    # 3. BloodHound AD ZIP native analyzer
+    bh_buf = io.BytesIO()
+    with zipfile.ZipFile(bh_buf, "w") as zf:
+        zf.writestr("computers.json", json.dumps({
+            "meta": {"type": "computers"},
+            "data": [{
+                "ObjectIdentifier": "S-1-5-21-1000",
+                "PrimaryGroupSID": "S-1-5-21-515",
+                "Properties": {"name": "APP01.CORP.LOCAL", "domain": "CORP.LOCAL", "unconstraineddelegation": True, "enabled": True},
+            }],
+        }))
+        zf.writestr("users.json", json.dumps({
+            "meta": {"type": "users"},
+            "data": [
+                {"Properties": {"name": "ASREP@CORP.LOCAL", "domain": "CORP.LOCAL", "dontreqpreauth": True, "enabled": True}},
+                {"Properties": {"name": "SQLSVC@CORP.LOCAL", "domain": "CORP.LOCAL", "hasspn": True, "admincount": True, "pwdneverexpires": True, "enabled": True}},
+            ],
+        }))
+        zf.writestr("domains.json", json.dumps({
+            "meta": {"type": "domains"},
+            "data": [{
+                "Properties": {"name": "CORP.LOCAL", "domain": "CORP.LOCAL", "highvalue": True},
+                "Aces": [{"PrincipalSID": "S-1-5-21-9999", "RightName": "GenericAll"}],
+            }],
+        }))
+    bh_zip_bytes = bh_buf.getvalue()
+    bh_sum, bh_findings = internal_ad_engine.analyze_bloodhound_archive(bh_zip_bytes, "sharphound.zip")
+    assert bh_sum["unconstrained_delegation"] == 1
+    assert bh_sum["dangerous_acls"] == 1
+    assert bh_sum["kerberoastable_admins"] == 1
+    assert bh_sum["asrep_roastable"] == 1
+    assert len(bh_findings) == 5
+
+    # 4. AzureHound Entra ID analyzer
+    az_items = [
+        {"kind": "AZRoleAssignment", "data": {"tenantId": "tenant-acme", "roleName": "Global Administrator", "principalDisplayName": f"Admin{i}"}}
+        for i in range(6)
+    ] + [
+        {"kind": "AZAppRoleAssignment", "data": {"tenantId": "tenant-acme", "principalDisplayName": "CI-Pipeline-SP", "permissionName": "RoleManagement.ReadWrite.Directory"}},
+        {"kind": "AZUser", "data": {"tenantId": "tenant-acme", "userPrincipalName": "ext@partner.com", "userType": "Guest", "accountEnabled": True, "isPrivileged": True}},
+    ]
+    ah_bytes = json.dumps({"data": az_items}).encode("utf-8")
+    ah_sum, ah_findings = internal_ad_engine.analyze_azurehound_json(ah_bytes, "azurehound.json")
+    assert ah_sum["global_admins"] == 6
+    assert ah_sum["risky_graph_apps"] == 1
+    assert ah_sum["privileged_guests"] == 1
+    assert len(ah_findings) == 3
+
+    # 5. API catalog + Responder Active Mode authorization guard
+    cat = client.get("/api/internal/catalog").json()
+    assert "netexec" in cat["tools"] and "bloodhound" in cat["tools"] and "azurehound" in cat["tools"] and "responder" in cat["tools"]
+
+    denied = client.post("/api/internal/scans", json={
+        "org_id": 1,
+        "name": "Unauthorized Active Responder",
+        "targets": "192.168.10.0/24",
+        "enable_netexec": False,
+        "enable_responder": True,
+        "responder_mode": "active",
+        "responder_active_authorized": False,
+    })
+    assert denied.status_code == 400
+
+    with_auth_called = {}
+    monkeypatch.setattr(main_mod, "start_internal_ad_scan_in_background", lambda sid, p: with_auth_called.update({"sid": sid, "payload": p}))
+    allowed = client.post("/api/internal/scans", json={
+        "org_id": 1,
+        "name": "Authorized Active Responder",
+        "targets": "192.168.10.0/24",
+        "enable_netexec": True,
+        "enable_responder": True,
+        "responder_mode": "active",
+        "responder_active_authorized": True,
+    })
+    assert allowed.status_code == 201
+    assert with_auth_called["payload"]["responder_active_authorized"] is True
+
+    # Verify responder active guard at engine level too
+    try:
+        asyncio.run(internal_ad_engine.run_lan_broadcast_audit(mode="active", active_authorized=False))
+        assert False, "Expected ValueError without client authorization"
+    except ValueError:
+        pass
+
+    # 6. Upload BloodHound .zip & AzureHound .json endpoints + ZIP download + HTML/PDF/DOCX rendering
+    up_bh = client.post(
+        "/api/internal/analyze-upload",
+        data={"org_id": "1", "name": "BloodHound Upload Audit", "kind": "bloodhound"},
+        files={"file": ("sharphound.zip", bh_zip_bytes, "application/zip")},
+    )
+    assert up_bh.status_code == 201
+    bh_scan = up_bh.json()
+    assert bh_scan["summary"]["internal_ad"]["bloodhound"]["dangerous_acls"] == 1
+
+    dl_zip = client.get(f"/api/internal/exports/{bh_scan['id']}")
+    assert dl_zip.status_code == 200 and dl_zip.content[:2] == b"PK"
+
+    up_ah = client.post(
+        "/api/internal/analyze-upload",
+        data={"org_id": "1", "name": "AzureHound Upload Audit", "kind": "azurehound"},
+        files={"file": ("azurehound.json", ah_bytes, "application/json")},
+    )
+    assert up_ah.status_code == 201
+    ah_scan = up_ah.json()
+    assert ah_scan["summary"]["internal_ad"]["azurehound"]["risky_graph_apps"] == 1
+
+    combined_internal = {"bloodhound": bh_sum, "azurehound": ah_sum, "enum4linux": e4l_sum, "lan_broadcast": {"mode": "passive", "hosts_seen": ["192.168.10.25"]}}
+    html_rep = generate_html_report(int(bh_scan["id"]), lang="en")
+    html_body = open(html_rep["file_path"], encoding="utf-8").read()
+    assert "Internal Network, Active Directory" in html_body and "CORP.LOCAL" in html_body
+
+    pdf_bytes = generate_pdf_document("Internal PDF", "CONFIDENTIAL", {}, {"name": "Client"}, "CORP.LOCAL", [], bh_findings + ah_findings, internal_ad=combined_internal)
+    assert pdf_bytes.startswith(b"%PDF") and len(pdf_bytes) > 5000
+
+    docx_bytes = generate_docx_report("Internal DOCX", "CONFIDENTIAL", {}, {"name": "Client"}, "CORP.LOCAL", [], bh_findings + ah_findings, internal_ad=combined_internal)
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "Internal Network, Active Directory" in doc_xml and "BloodHound AD" in doc_xml and "AzureHound Entra ID" in doc_xml
+
+
+def test_external_osint_shodan_rdap_greynoise_and_reports(monkeypatch):
+    import asyncio
+    import io
+    import json
+    import zipfile
+    import httpx
+    import backend.main as main_mod
+    from backend.database import get_db_connection
+    from backend.scanners import osint_engine
+    from backend.report_engine import generate_html_report
+    from backend.export_engine import generate_pdf_document, generate_docx_report
+
+    # Clear cached osint entries first
+    conn = get_db_connection()
+    with conn:
+        conn.execute("DELETE FROM cve_intel_cache WHERE cache_key LIKE 'osint:%';")
+    conn.close()
+
+    # 1. RFC1918 / loopback targets must skip external calls immediately
+    http_calls = []
+
+    async def _fail_if_called(self, url, **kwargs):
+        http_calls.append(str(url))
+        raise AssertionError(f"Unexpected HTTP call for private IP: {url}")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _fail_if_called)
+    priv_rows, priv_findings = asyncio.run(
+        osint_engine.run_external_osint(["127.0.0.1", "192.168.1.10"], {"192.168.1.20": {"ip": "192.168.1.20"}})
+    )
+    assert priv_rows == [] and priv_findings == [] and http_calls == []
+
+    # 2. Mock Shodan InternetDB + RIPEstat + GreyNoise Community for a public IP
+    class _FakeResp:
+        def __init__(self, status_code: int, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    pub_ip = "93.184.216.34"
+
+    async def _mock_get(self, url, **kwargs):
+        u = str(url)
+        http_calls.append(u)
+        if "internetdb.shodan.io" in u:
+            return _FakeResp(200, {
+                "ip": pub_ip,
+                "ports": [22, 80, 443],
+                "hostnames": ["edge.example.org"],
+                "cpes": ["cpe:/a:openbsd:openssh:8.9"],
+                "vulns": ["CVE-2023-38408"],
+                "tags": ["eol-os"],
+            })
+        if "network-info" in u:
+            return _FakeResp(200, {"data": {"asns": ["64512"], "prefix": "93.184.216.0/24"}, "status": "ok"})
+        if "as-overview" in u:
+            return _FakeResp(200, {"data": {"holder": "Example ISP"}, "status": "ok"})
+        if "greynoise.io" in u:
+            return _FakeResp(200, {
+                "ip": pub_ip,
+                "noise": True,
+                "riot": False,
+                "classification": "malicious",
+                "name": "Scanner",
+                "link": f"https://viz.greynoise.io/ip/{pub_ip}",
+            })
+        return _FakeResp(404, {})
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _mock_get)
+    osint_rows, osint_findings = asyncio.run(osint_engine.run_external_osint([pub_ip], {}))
+
+    assert len(osint_rows) == 1
+    row = osint_rows[0]
+    assert row["ip"] == pub_ip
+    assert row["asn"] == "AS64512"
+    assert row["prefix"] == "93.184.216.0/24"
+    assert row["org"] == "Example ISP"
+    assert row["ports"] == [22, 80, 443]
+    assert row["vulns"] == ["CVE-2023-38408"]
+    assert row["tags"] == ["eol-os"]
+    assert row["greynoise_classification"] == "malicious"
+    assert row["greynoise_noise"] is True
+
+    titles = {f["title"] for f in osint_findings}
+    assert len(osint_findings) == 4
+    assert all(f["source_engine"] == "osint" for f in osint_findings)
+    assert "Shodan InternetDB Risky Exposure Tag(s) Detected" in titles
+    assert "Public IP Flagged Malicious by GreyNoise" in titles
+    assert "Shodan InternetDB: Sensitive Management/Data Port(s) Externally Exposed" in titles
+    assert "Shodan InternetDB: 1 Known CVE(s) Indexed on External IP" in titles
+
+    # Verify 24h SQLite cache hit avoids HTTP calls on repeat run
+    calls_before = len(http_calls)
+    osint_rows2, _ = asyncio.run(osint_engine.run_external_osint([pub_ip], {}))
+    assert len(http_calls) == calls_before and osint_rows2[0]["asn"] == "AS64512"
+
+    # 3. POST /api/scans persists enable_external_osint flag & renders HTML/PDF/DOCX
+    monkeypatch.setattr(main_mod, "start_scan_in_background", lambda scan_id: None)
+    osint_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "External OSINT Scan",
+        "targets": pub_ip,
+        "engines": ["native_net"],
+        "enable_external_osint": False,
+    }).json()
+    assert osint_scan["config"]["enable_external_osint"] is False
+
+    recon_payload = {"external_osint": osint_rows}
+    conn = get_db_connection()
+    with conn:
+        conn.execute(
+            "UPDATE scans SET status='completed', summary_json=? WHERE id=?;",
+            (json.dumps({"total_hosts": 1, "total_findings": len(osint_findings), "risk_score": 68, "recon": recon_payload}), int(osint_scan["id"])),
+        )
+    conn.close()
+
+    html_rep = generate_html_report(int(osint_scan["id"]), lang="en")
+    html_body = open(html_rep["file_path"], encoding="utf-8").read()
+    assert "External OSINT Intelligence" in html_body and pub_ip in html_body and "Example ISP" in html_body and "CVE-2023-38408" in html_body
+
+    pdf_bytes = generate_pdf_document("OSINT PDF", "CONFIDENTIAL", {}, {"name": "Client"}, pub_ip, [], osint_findings, recon_summary=recon_payload)
+    assert pdf_bytes.startswith(b"%PDF") and len(pdf_bytes) > 5000
+
+    docx_bytes = generate_docx_report("OSINT DOCX", "CONFIDENTIAL", {}, {"name": "Client"}, pub_ip, [], osint_findings, recon_summary=recon_payload)
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "External OSINT" in doc_xml and pub_ip in doc_xml and "Example ISP" in doc_xml and "CVE-2023-38408" in doc_xml
+

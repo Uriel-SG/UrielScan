@@ -115,6 +115,7 @@ export interface Scan {
   hosts?: HostInfo[];
   logs: string[];
   cloud_posture?: CloudPostureSummary;
+  internal_ad?: InternalADSummary;
   ai_analysis?: {
     executive_summary: string;
     red_team_paths: string[];
@@ -228,6 +229,22 @@ export interface ReconSummary {
     published?: string;
     summary?: string;
     poc_urls?: string[];
+  }>;
+  external_osint?: Array<{
+    ip: string;
+    hostnames?: string[];
+    asn?: string;
+    prefix?: string;
+    org?: string;
+    ports?: number[];
+    cpes?: string[];
+    vulns?: string[];
+    tags?: string[];
+    greynoise_classification?: string;
+    greynoise_name?: string;
+    greynoise_noise?: boolean;
+    greynoise_riot?: boolean;
+    greynoise_link?: string;
   }>;
 }
 
@@ -442,4 +459,50 @@ export interface CloudCatalog {
   };
   providers: Record<string, CloudProviderSpec>;
   compliances: Array<{ id: string; label: string }>;
+}
+
+export interface InternalToolInfo {
+  installed: boolean;
+  path: string;
+  version: string;
+  active_binary?: boolean;
+}
+
+export interface InternalADCatalog {
+  tools: {
+    netexec: InternalToolInfo;
+    bloodhound: InternalToolInfo;
+    azurehound: InternalToolInfo;
+    enum4linux_ng: InternalToolInfo;
+    responder: InternalToolInfo;
+  };
+  netexec_protocols: string[];
+  netexec_checks: string[];
+}
+
+export interface InternalADSummary {
+  targets?: string;
+  domain?: string;
+  export_available?: boolean;
+  enum4linux?: { open_shares: string[]; users_count: number };
+  bloodhound?: {
+    domain: string;
+    unconstrained_delegation: number;
+    dangerous_acls: number;
+    kerberoastable_admins: number;
+    asrep_roastable: number;
+    pwd_never_expires: number;
+    domain_admins_count: number;
+  };
+  azurehound?: {
+    tenant: string;
+    global_admins: number;
+    risky_graph_apps: number;
+    privileged_guests: number;
+  };
+  lan_broadcast?: {
+    mode: string;
+    duration: number;
+    hosts_seen: string[];
+  };
 }

@@ -872,7 +872,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
               activeTab === 'recon' ? 'border-theme-accent bg-subtle text-theme-primary' : 'border-transparent text-theme-muted hover:text-theme-primary'
             }`}
           >
-            {L('Recon / Surface & Tech', 'Recon / Superficie & Tech')} ({currentScan.recon.tech_stack?.length ?? 0} {L('tech', 'tech')} • {currentScan.recon.total_subdomains ?? 0}/{currentScan.recon.directories?.length ?? 0})
+            {L('Recon / Surface & Tech', 'Recon / Superficie & Tech')} ({currentScan.recon.tech_stack?.length ?? 0} {L('tech', 'tech')} • {currentScan.recon.external_osint?.length ?? 0} OSINT • {currentScan.recon.total_subdomains ?? 0}/{currentScan.recon.directories?.length ?? 0})
           </button>
         )}
         <button
@@ -1155,7 +1155,7 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
       {activeTab === 'recon' && currentScan?.recon && (
         <div className="space-y-4">
           {/* Recon KPI Strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
             <div className="card-industrial p-3">
               <div className="text-[10px] font-mono uppercase text-theme-muted">{L('Total Subdomains', 'Sottodomini Totali')}</div>
               <div className="text-lg font-bold text-theme-primary font-mono">{currentScan.recon.total_subdomains ?? 0}</div>
@@ -1188,6 +1188,12 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
               <div className="text-[10px] font-mono uppercase text-theme-muted">{L('CVE / PoC Intel', 'CVE / PoC Intel')}</div>
               <div className={`text-lg font-bold font-mono ${(currentScan.recon.cve_intel?.length ?? 0) > 0 ? 'text-amber-400' : 'text-theme-primary'}`}>
                 {currentScan.recon.cve_intel?.length ?? 0}
+              </div>
+            </div>
+            <div className="card-industrial p-3">
+              <div className="text-[10px] font-mono uppercase text-theme-muted">{L('External OSINT', 'OSINT Esterno')}</div>
+              <div className="text-lg font-bold text-teal-400 font-mono">
+                {currentScan.recon.external_osint?.length ?? 0}
               </div>
             </div>
           </div>
@@ -1415,6 +1421,86 @@ export const ScansExplorer: React.FC<ScansExplorerProps> = ({
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* External OSINT Intelligence (Shodan InternetDB / RIPEstat / GreyNoise) */}
+          {(currentScan.recon.external_osint?.length ?? 0) > 0 && (
+            <div className="card-industrial p-4 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-bold uppercase tracking-wider text-theme-secondary">
+                  {L('External OSINT Intelligence (Shodan InternetDB / RIPEstat / GreyNoise)', 'Intelligence OSINT Esterna (Shodan InternetDB / RIPEstat / GreyNoise)')}
+                </div>
+                <span className="text-[10px] font-mono text-theme-muted">
+                  {L('Passive public IP enrichment only', 'Solo arricchimento passivo su IP pubblici')}
+                </span>
+              </div>
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-theme text-[11px] font-mono text-theme-muted">
+                    <tr>
+                      <th className="py-1.5 pr-3">IP / Hostnames</th>
+                      <th className="py-1.5 pr-3">ASN / Org / Prefix</th>
+                      <th className="py-1.5 pr-3">{L('Exposed Ports', 'Porte Esposte')}</th>
+                      <th className="py-1.5 pr-3">Shodan CVEs / Tags</th>
+                      <th className="py-1.5">GreyNoise</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-theme-subtle">
+                    {(currentScan.recon.external_osint || []).map((eo, i) => {
+                      const gnCls = (eo.greynoise_classification || 'unknown').toLowerCase();
+                      const gnBadgeClass =
+                        gnCls === 'malicious'
+                          ? 'bg-red-500/20 border-red-500/40 text-red-400'
+                          : (gnCls === 'benign' || eo.greynoise_riot)
+                            ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
+                            : 'bg-slate-500/15 border-slate-500/30 text-theme-muted';
+                      return (
+                        <tr key={i} className="hover:bg-subtle">
+                          <td className="py-1.5 pr-3 font-mono whitespace-nowrap">
+                            <div className="font-bold text-theme-accent">{eo.ip}</div>
+                            {(eo.hostnames?.length ?? 0) > 0 && (
+                              <div className="text-[10px] text-theme-muted">{eo.hostnames?.slice(0, 2).join(', ')}</div>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-3 text-theme-primary">
+                            <div className="font-mono text-[11px] font-semibold">
+                              {[eo.asn, eo.prefix].filter(Boolean).join(' • ') || '-'}
+                            </div>
+                            {eo.org && <div className="text-[11px] text-theme-secondary">{eo.org}</div>}
+                          </td>
+                          <td className="py-1.5 pr-3 font-mono text-[11px] text-theme-primary">
+                            {(eo.ports && eo.ports.length > 0) ? eo.ports.join(', ') : '-'}
+                          </td>
+                          <td className="py-1.5 pr-3 font-mono text-[11px]">
+                            <div className="flex flex-wrap gap-1">
+                              {(eo.tags || []).map((tag, idx) => (
+                                <span key={`t-${idx}`} className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px]">
+                                  {tag}
+                                </span>
+                              ))}
+                              {(eo.vulns || []).slice(0, 6).map((v, idx) => (
+                                <span key={`v-${idx}`} className="px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/30 text-red-300 text-[10px]">
+                                  {v}
+                                </span>
+                              ))}
+                              {!(eo.tags?.length) && !(eo.vulns?.length) && <span className="text-theme-muted">-</span>}
+                            </div>
+                          </td>
+                          <td className="py-1.5 font-mono text-[11px] whitespace-nowrap">
+                            <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase ${gnBadgeClass}`}>
+                              {gnCls}
+                            </span>
+                            {eo.greynoise_name && eo.greynoise_name !== 'not observed' && (
+                              <span className="ml-1.5 text-theme-secondary">{eo.greynoise_name}</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

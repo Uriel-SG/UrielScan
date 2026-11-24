@@ -19,6 +19,7 @@ import {
   WordlistItem,
   CloudCatalog,
   CloudProfile,
+  InternalADCatalog,
 } from '../types';
 
 const API_BASE = '/api';
@@ -124,6 +125,7 @@ function normalizeScan(raw: any): Scan {
     enable_dir_enum: Boolean(cfg.enable_dir_enum),
     recon: sum.recon || undefined,
     cloud_posture: sum.cloud_posture || undefined,
+    internal_ad: sum.internal_ad || undefined,
     status: (raw.status || 'pending') as Scan['status'],
     progress: typeof raw.progress === 'number' ? raw.progress : 0,
     started_at: raw.started_at || new Date().toISOString(),
@@ -815,6 +817,7 @@ export const api = {
     dir_time_limit?: number;
     enable_tech_fingerprint?: boolean;
     enable_cve_intel?: boolean;
+    enable_external_osint?: boolean;
   }): Promise<Scan> {
     const res = await fetch(`${API_BASE}/scans`, {
       method: 'POST',
@@ -1272,6 +1275,78 @@ export const api = {
       throw new Error(err.detail || 'Impossibile avviare audit Cloud Security');
     }
     return normalizeScan(await res.json());
+  },
+
+  async getInternalCatalog(): Promise<InternalADCatalog> {
+    const res = await fetch(`${API_BASE}/internal/catalog`, {
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Failed to load Internal & AD catalog');
+    return await res.json();
+  },
+
+  async installInternalTool(toolName: string): Promise<{ success: boolean; message: string; installed?: boolean }> {
+    const res = await fetch(`${API_BASE}/internal/install/${encodeURIComponent(toolName)}`, {
+      method: 'POST',
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error(`Failed to install ${toolName}`);
+    return await res.json();
+  },
+
+  async launchInternalADScan(payload: {
+    org_id: string | number;
+    name: string;
+    targets: string;
+    domain?: string;
+    username?: string;
+    password?: string;
+    enable_netexec: boolean;
+    netexec_protocols: string[];
+    netexec_checks: string[];
+    enable_enum4linux: boolean;
+    enable_bloodhound: boolean;
+    enable_azurehound: boolean;
+    azure_tenant_id?: string;
+    azure_client_id?: string;
+    azure_client_secret?: string;
+    enable_responder: boolean;
+    responder_mode: 'passive' | 'active';
+    responder_active_authorized: boolean;
+    responder_duration_sec: number;
+    responder_interface?: string;
+  }): Promise<Scan> {
+    const res = await fetch(`${API_BASE}/internal/scans`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Impossibile avviare audit Internal & AD' }));
+      throw new Error(err.detail || 'Impossibile avviare audit Internal & AD');
+    }
+    return normalizeScan(await res.json());
+  },
+
+  async uploadIdentityArchive(formData: FormData): Promise<Scan> {
+    const res = await fetch(`${API_BASE}/internal/analyze-upload`, {
+      method: 'POST',
+      headers: getAuthHeaders(false),
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Errore analisi file BloodHound/AzureHound' }));
+      throw new Error(err.detail || 'Errore analisi file BloodHound/AzureHound');
+    }
+    return normalizeScan(await res.json());
+  },
+
+  async downloadInternalExport(scanId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/internal/exports/${encodeURIComponent(scanId)}`, {
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Archivio BloodHound/AzureHound non disponibile');
+    await triggerBlobDownload(res, `urielscan_ad_scan_${scanId}.zip`);
   },
 };
 

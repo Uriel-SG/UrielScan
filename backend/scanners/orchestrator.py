@@ -10,6 +10,7 @@ from backend.scanners.nuclei_engine import detect_nuclei, run_nuclei_scan
 from backend.scanners.zap_engine import detect_zap, run_zap_scan, _format_web_urls
 from backend.scanners.recon_engine import run_subraptor_pipeline, run_feroxbuster_scan
 from backend.scanners.tech_cve_engine import run_tech_fingerprint, run_cve_intel_correlation
+from backend.scanners.osint_engine import run_external_osint
 from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.nat_guard import (
     check_targets_nat_loopback,
@@ -540,6 +541,22 @@ async def run_scan_pipeline(scan_id: int) -> None:
                 recon_summary["cve_intel"] = cve_matches
             if intel_findings:
                 all_findings.extend(intel_findings)
+
+        if STOP_FLAGS.get(scan_id, False):
+            return
+
+        if config.get("enable_external_osint", True):
+            update_progress(89, "External OSINT Intelligence (Shodan InternetDB / RIPEstat / GreyNoise)...")
+            osint_rows, osint_findings = await run_external_osint(
+                targets=targets,
+                hosts_dict=all_hosts,
+                proxy_url=active_proxy_url,
+                log_callback=append_log,
+            )
+            if osint_rows:
+                recon_summary["external_osint"] = osint_rows
+            if osint_findings:
+                all_findings.extend(osint_findings)
 
         if STOP_FLAGS.get(scan_id, False):
             return
