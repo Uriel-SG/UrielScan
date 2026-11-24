@@ -4,12 +4,15 @@ import json
 import os
 import platform
 import re
+import select
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +26,7 @@ from backend.scanners.archive_utils import safe_extract_zip
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BIN_DIR = BASE_DIR / "bin"
+NETEXEC_DIR = BIN_DIR / "netexec"
 NXC_VENV_DIR = BIN_DIR / "nxc_venv"
 BH_VENV_DIR = BIN_DIR / "bloodhound_venv"
 AZUREHOUND_DIR = BIN_DIR / "azurehound"
@@ -67,10 +71,24 @@ def _venv_exe(venv_dir: Path, names: List[str]) -> Optional[Path]:
     return None
 
 
+def _find_netexec_binary() -> Optional[Path]:
+    """Locate standalone NetExec binary in bin/netexec, legacy venv, or system PATH."""
+    target_names = ("nxc.exe", "netexec.exe") if os.name == "nt" else ("nxc", "netexec")
+    if NETEXEC_DIR.is_dir():
+        for name in target_names:
+            for p in NETEXEC_DIR.rglob(name):
+                if p.is_file():
+                    return p
+    venv_hit = _venv_exe(NXC_VENV_DIR, ["nxc.exe", "netexec.exe", "nxc", "netexec"])
+    if venv_hit:
+        return venv_hit
+    if w := (shutil.which("nxc") or shutil.which("netexec")):
+        return Path(w)
+    return None
+
+
 def detect_internal_tools() -> Dict[str, Dict[str, Any]]:
-    nxc_bin = _venv_exe(NXC_VENV_DIR, ["nxc.exe", "netexec.exe", "nxc", "netexec"]) or (
-        Path(w) if (w := shutil.which("nxc") or shutil.which("netexec")) else None
-    )
+    nxc_bin = _find_netexec_binary()
     bh_bin = _venv_exe(BH_VENV_DIR, ["bloodhound-python.exe", "bloodhound-python"]) or (
         Path(w) if (w := shutil.which("bloodhound-python")) else None
     )
@@ -117,9 +135,83 @@ async def install_internal_tool(tool_name: str) -> Dict[str, Any]:
     sub = "Scripts" if os.name == "nt" else "bin"
 
     try:
-        if t in ("netexec", "bloodhound"):
-            venv_dir = NXC_VENV_DIR if t == "netexec" else BH_VENV_DIR
-            pkg = "netexec" if t == "netexec" else "bloodhound"
+        if t == "netexec":
+            NETEXEC_DIR.mkdir(parents=True, exist_ok=True)
+            sys_name = platform.system()
+
+            def _match_nxc_asset(assets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                for a in assets:
+                    nm = str(a.get("name") or "").lower()
+                    if sys_name == "Windows" and ("windows" in nm or nm in ("nxc.exe", "nxc.exe.zip")):
+                        return a
+                    if sys_name == "Darwin" and ("macos" in nm or "darwin" in nm or nm == "nxc-macos"):
+                        return a
+                    if sys_name not in ("Windows", "Darwin") and ("ubuntu" in nm or "linux" in nm or nm == "nxc"):
+                        return a
+                return None
+
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                rel_resp = await client.get("https://api.github.com/repos/Pennyw0rth/NetExec/releases?per_page=10")
+                rel_resp.raise_for_status()
+                releases = rel_resp.json() if isinstance(rel_resp.json(), list) else []
+                chosen_tag = ""
+                chosen_asset: Optional[Dict[str, Any]] = None
+                for rel in releases:
+                    asset = _match_nxc_asset(rel.get("assets") or [])
+                    if asset:
+                        chosen_tag = str(rel.get("tag_name") or "")
+                        chosen_asset = asset
+                        break
+
+                if chosen_asset:
+                    dl = await client.get(chosen_asset["browser_download_url"])
+                    dl.raise_for_status()
+                    aname = str(chosen_asset["name"])
+                    target_path = NETEXEC_DIR / aname
+                    target_path.write_bytes(dl.content)
+                    if aname.lower().endswith(".zip"):
+                        safe_extract_zip(target_path, NETEXEC_DIR)
+                        target_path.unlink(missing_ok=True)
+                    elif sys_name != "Windows":
+                        norm_bin = NETEXEC_DIR / "nxc"
+                        if target_path != norm_bin:
+                            shutil.move(str(target_path), str(norm_bin))
+                        os.chmod(norm_bin, 0o755)
+                    bin_found = _find_netexec_binary()
+                    if bin_found and sys_name != "Windows":
+                        os.chmod(bin_found, 0o755)
+                    det = detect_internal_tools()["netexec"]
+                    if det["installed"]:
+                        return {
+                            "success": True,
+                            "message": f"NetExec {chosen_tag} installato in bin/netexec.".strip(),
+                            **det,
+                        }
+
+            # Source archive fallback only if GitHub binary assets were unavailable
+            py_v = NXC_VENV_DIR / sub / py_name
+            if not py_v.is_file():
+                p1 = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "venv", str(NXC_VENV_DIR),
+                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                _, err1 = await asyncio.wait_for(p1.communicate(), timeout=120.0)
+                if p1.returncode != 0 or not py_v.is_file():
+                    return {"success": False, "message": f"Errore creazione venv netexec: {err1.decode('utf-8', errors='replace')[:250]}"}
+            p2 = await asyncio.create_subprocess_exec(
+                str(py_v), "-m", "pip", "install", "--upgrade", "pip",
+                "https://github.com/Pennyw0rth/NetExec/archive/refs/heads/main.zip",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out2, err2 = await asyncio.wait_for(p2.communicate(), timeout=600.0)
+            if p2.returncode != 0:
+                return {"success": False, "message": f"Installazione NetExec fallita: {(err2 or out2).decode('utf-8', errors='replace')[-300:]}"}
+            det = detect_internal_tools()["netexec"]
+            return {"success": det["installed"], "message": "NetExec installato in bin/nxc_venv.", **det}
+
+        if t == "bloodhound":
+            venv_dir = BH_VENV_DIR
+            pkg = "bloodhound"
             py_v = venv_dir / sub / py_name
             if not py_v.is_file():
                 p1 = await asyncio.create_subprocess_exec(
@@ -687,6 +779,309 @@ def analyze_azurehound_json(
 
 
 # ---------------------------------------------------------------------
+# OS Network Interfaces & Standalone Decoupled Responder Session Manager
+# ---------------------------------------------------------------------
+
+_RESPONDER_LOCK = threading.Lock()
+_RESPONDER_STATE: Dict[str, Any] = {
+    "running": False,
+    "mode": "passive",
+    "interface": "all",
+    "bind_ip": "0.0.0.0",
+    "started_at": "",
+    "started_ts": 0.0,
+    "hosts_seen": [],
+    "protocols_seen": [],
+    "packets_count": 0,
+    "logs": [],
+    "error": "",
+    "stop_event": None,
+    "proc": None,
+}
+
+
+def list_network_interfaces() -> List[Dict[str, str]]:
+    """Enumerate available local IPv4 network interfaces for Responder binding."""
+    items: List[Dict[str, str]] = [
+        {"name": "all", "ip": "0.0.0.0", "label": "All Interfaces (0.0.0.0)"}
+    ]
+    seen_ips: Set[str] = {"0.0.0.0", "127.0.0.1"}
+
+    try:
+        if platform.system() == "Windows":
+            proc = subprocess.run(
+                ["ipconfig"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=5,
+            )
+            raw = proc.stdout.decode("utf-8", errors="ignore")
+            cur_adapter = "Interface"
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if not line[0].isspace() and stripped.endswith(":"):
+                    header = stripped[:-1].strip()
+                    header = re.sub(
+                        r"^(?:Ethernet adapter|Wireless LAN adapter|Unknown adapter|Tunnel adapter|Scheda LAN wireless|Scheda Ethernet|Scheda Unknown|Scheda tunnel)\s+",
+                        "",
+                        header,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    cur_adapter = header or stripped[:-1].strip()
+                    continue
+                m = re.search(r"(?:IPv4|Indirizzo IPv4)[^:]*:\s*(\d{1,3}(?:\.\d{1,3}){3})", stripped, re.IGNORECASE)
+                if m:
+                    ip = m.group(1)
+                    if ip not in seen_ips:
+                        seen_ips.add(ip)
+                        items.append({"name": cur_adapter, "ip": ip, "label": f"{cur_adapter} ({ip})"})
+        else:
+            proc = subprocess.run(
+                ["ip", "-4", "-o", "addr", "show"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=5,
+            )
+            raw = proc.stdout.decode("utf-8", errors="ignore")
+            for line in raw.splitlines():
+                m = re.search(r"^\d+:\s+([^\s:]+)\s+inet\s+(\d{1,3}(?:\.\d{1,3}){3})/", line.strip())
+                if m:
+                    iface, ip = m.group(1), m.group(2)
+                    if ip not in seen_ips:
+                        seen_ips.add(ip)
+                        items.append({"name": iface, "ip": ip, "label": f"{iface} ({ip})"})
+    except Exception:
+        pass
+
+    return items
+
+
+def _append_responder_log(level: str, msg: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    with _RESPONDER_LOCK:
+        logs = _RESPONDER_STATE["logs"]
+        logs.append({"time": ts, "level": level, "msg": msg})
+        if len(logs) > 300:
+            del logs[:-300]
+
+
+def get_responder_session_status() -> Dict[str, Any]:
+    """Return a JSON-safe snapshot of the standalone live Responder listener."""
+    with _RESPONDER_LOCK:
+        running = bool(_RESPONDER_STATE["running"])
+        started_ts = float(_RESPONDER_STATE["started_ts"] or 0.0)
+        elapsed = int(max(0.0, time.monotonic() - started_ts)) if (running and started_ts > 0.0) else 0
+        return {
+            "running": running,
+            "mode": _RESPONDER_STATE["mode"],
+            "interface": _RESPONDER_STATE["interface"],
+            "bind_ip": _RESPONDER_STATE["bind_ip"],
+            "started_at": _RESPONDER_STATE["started_at"],
+            "elapsed_sec": elapsed,
+            "hosts_seen": list(_RESPONDER_STATE["hosts_seen"]),
+            "protocols_seen": list(_RESPONDER_STATE["protocols_seen"]),
+            "packets_count": int(_RESPONDER_STATE["packets_count"]),
+            "logs": list(_RESPONDER_STATE["logs"]),
+            "error": _RESPONDER_STATE["error"],
+        }
+
+
+def start_responder_session(
+    mode: str = "passive",
+    active_authorized: bool = False,
+    interface: str = "all",
+    bind_ip: str = "0.0.0.0",
+) -> Dict[str, Any]:
+    """Start standalone live Responder / passive UDP broadcast listener independently of scans."""
+    m = (mode or "passive").strip().lower()
+    if m not in ("passive", "active"):
+        raise ValueError("Modalità Responder non valida (usa 'passive' o 'active').")
+    if m == "active" and not active_authorized:
+        raise ValueError("Responder Active Mode richiede l'esplicita conferma di autorizzazione del cliente.")
+
+    with _RESPONDER_LOCK:
+        if _RESPONDER_STATE["running"]:
+            return get_responder_session_status()
+
+    iface_clean = (interface or "all").strip()
+    bind_clean = (bind_ip or "0.0.0.0").strip()
+    try:
+        socket.inet_aton(bind_clean)
+    except OSError:
+        bind_clean = "0.0.0.0"
+
+    resp_bin: Optional[str] = None
+    if m == "active":
+        resp_bin = shutil.which("responder") or shutil.which("Responder.py")
+        if not resp_bin:
+            raise RuntimeError("Binario Responder non trovato su questo host (Active Mode richiede Linux/root; usa Passive Mode su Windows).")
+
+    stop_evt = threading.Event()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _RESPONDER_LOCK:
+        _RESPONDER_STATE.update({
+            "running": True,
+            "mode": m,
+            "interface": iface_clean,
+            "bind_ip": bind_clean,
+            "started_at": now_iso,
+            "started_ts": time.monotonic(),
+            "hosts_seen": [],
+            "protocols_seen": [],
+            "packets_count": 0,
+            "logs": [],
+            "error": "",
+            "stop_event": stop_evt,
+            "proc": None,
+        })
+
+    if m == "active" and resp_bin:
+        iface_arg = iface_clean if (iface_clean != "all" and _SAFE_ARG_RE.match(iface_clean)) else "eth0"
+        _append_responder_log("WARN", f"[AUTHORIZED ACTIVE] Launching {resp_bin} -I {iface_arg} -wF ...")
+
+        def _active_worker() -> None:
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    [resp_bin, "-I", iface_arg, "-wF"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                with _RESPONDER_LOCK:
+                    _RESPONDER_STATE["proc"] = proc
+                if proc.stdout:
+                    for raw_ln in iter(proc.stdout.readline, ""):
+                        if stop_evt.is_set():
+                            break
+                        ln = raw_ln.rstrip()
+                        if ln:
+                            _append_responder_log("INFO", ln)
+                            ip_m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", ln)
+                            if ip_m:
+                                with _RESPONDER_LOCK:
+                                    if ip_m.group(1) not in _RESPONDER_STATE["hosts_seen"]:
+                                        _RESPONDER_STATE["hosts_seen"].append(ip_m.group(1))
+                                    _RESPONDER_STATE["packets_count"] += 1
+            except Exception as exc:
+                with _RESPONDER_LOCK:
+                    _RESPONDER_STATE["error"] = str(exc)
+                _append_responder_log("ERROR", f"Responder Active error: {exc}")
+            finally:
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                with _RESPONDER_LOCK:
+                    if _RESPONDER_STATE.get("stop_event") is stop_evt:
+                        _RESPONDER_STATE["running"] = False
+                        _RESPONDER_STATE["proc"] = None
+
+        threading.Thread(target=_active_worker, daemon=True).start()
+        return get_responder_session_status()
+
+    _append_responder_log(
+        "INFO",
+        f"[PASSIVE LISTENER] Binding UDP 5355 (LLMNR), 137 (NBT-NS), 5353 (mDNS) on {iface_clean} ({bind_clean}) — zero packets sent...",
+    )
+
+    def _passive_worker() -> None:
+        sock_map: Dict[socket.socket, Tuple[int, str]] = {}
+        try:
+            for port, proto_lbl, mcast_ip in (
+                (5355, "LLMNR", "224.0.0.252"),
+                (137, "NBT-NS", ""),
+                (5353, "mDNS", "224.0.0.251"),
+            ):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind((bind_clean, port))
+                    if mcast_ip:
+                        try:
+                            mreq = struct.pack("4s4s", socket.inet_aton(mcast_ip), socket.inet_aton(bind_clean))
+                            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                        except OSError:
+                            pass
+                    sock.setblocking(False)
+                    sock_map[sock] = (port, proto_lbl)
+                except OSError as exc:
+                    _append_responder_log("WARN", f"UDP/{port} ({proto_lbl}) unavailable on {bind_clean}: {exc}")
+
+            if sock_map:
+                bound_desc = ", ".join(f"{p}/{lbl}" for p, lbl in sock_map.values())
+                _append_responder_log("INFO", f"Listening passively on {bound_desc}. Waiting for LAN broadcast queries...")
+            else:
+                _append_responder_log("WARN", "No UDP broadcast ports could be bound (check permissions or port conflicts).")
+
+            while not stop_evt.is_set():
+                if not sock_map:
+                    stop_evt.wait(0.5)
+                    continue
+                try:
+                    readable, _, _ = select.select(list(sock_map.keys()), [], [], 0.5)
+                except Exception:
+                    stop_evt.wait(0.5)
+                    continue
+                for s in readable:
+                    port, proto_lbl = sock_map[s]
+                    try:
+                        data, addr = s.recvfrom(4096)
+                        src_ip = addr[0]
+                        is_new_host = False
+                        with _RESPONDER_LOCK:
+                            _RESPONDER_STATE["packets_count"] += 1
+                            if src_ip not in _RESPONDER_STATE["hosts_seen"]:
+                                _RESPONDER_STATE["hosts_seen"].append(src_ip)
+                                is_new_host = True
+                            if proto_lbl not in _RESPONDER_STATE["protocols_seen"]:
+                                _RESPONDER_STATE["protocols_seen"].append(proto_lbl)
+                        tag = "WARN" if is_new_host else "INFO"
+                        _append_responder_log(tag, f"[{proto_lbl}:{port}] {src_ip}:{addr[1]} -> {len(data)}B broadcast query (passive, 0 spoofing)")
+                    except OSError:
+                        continue
+        finally:
+            for s in sock_map:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            with _RESPONDER_LOCK:
+                if _RESPONDER_STATE.get("stop_event") is stop_evt:
+                    _RESPONDER_STATE["running"] = False
+
+    threading.Thread(target=_passive_worker, daemon=True).start()
+    return get_responder_session_status()
+
+
+def stop_responder_session() -> Dict[str, Any]:
+    """Stop the standalone live Responder / passive UDP broadcast listener."""
+    with _RESPONDER_LOCK:
+        stop_evt = _RESPONDER_STATE.get("stop_event")
+        proc = _RESPONDER_STATE.get("proc")
+        was_running = bool(_RESPONDER_STATE.get("running"))
+        if stop_evt is not None:
+            stop_evt.set()
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        _RESPONDER_STATE["running"] = False
+    if was_running:
+        _append_responder_log("INFO", "Responder listener stopped by user.")
+    return get_responder_session_status()
+
+
+# ---------------------------------------------------------------------
 # Live LAN Broadcast / Responder Runner (Passive Default + Auth Active)
 # ---------------------------------------------------------------------
 
@@ -827,6 +1222,153 @@ def start_internal_ad_scan_in_background(scan_id: int, payload: Dict[str, Any]) 
     threading.Thread(target=_worker, daemon=True).start()
 
 
+async def execute_internal_ad_modules(
+    scan_id: int,
+    targets: str,
+    payload: Dict[str, Any],
+    append_log: Callable[[str, str], Any],
+    update_progress: Callable[[int, str], Any],
+    base_progress: int = 20,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Execute enabled Internal/AD modules (NetExec, Enum4linux-ng, BloodHound, AzureHound, optional Responder)."""
+    targets = str(targets or payload.get("targets") or "").strip()
+    domain = str(payload.get("domain") or "").strip()
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    tools = detect_internal_tools()
+    all_findings: List[Dict[str, Any]] = []
+    internal_summary: Dict[str, Any] = {"targets": targets, "domain": domain}
+
+    # NetExec
+    if payload.get("enable_netexec"):
+        update_progress(min(89, base_progress), "Esecuzione NetExec (audit protocolli interni)...")
+        if not tools["netexec"]["installed"]:
+            append_log("WARN", "[NetExec] Binario non installato: installalo dal pannello Internal & AD.")
+        else:
+            protos = [p for p in (payload.get("netexec_protocols") or ["smb"]) if p in NETEXEC_PROTOCOLS]
+            checks = set(payload.get("netexec_checks") or [])
+            for proto in protos:
+                args = [tools["netexec"]["path"], proto, targets]
+                if username and password:
+                    args.extend(["-u", username, "-p", password])
+                    if domain:
+                        args.extend(["-d", domain])
+                else:
+                    args.extend(["-u", "", "-p", ""])
+                if proto == "smb":
+                    if "null_shares" in checks:
+                        args.append("--shares")
+                    if "pass_pol" in checks and username:
+                        args.append("--pass-pol")
+                if proto == "ldap" and username:
+                    if "kerberoast" in checks:
+                        args.extend(["--kerberoasting", "-"])
+                    if "asrep" in checks:
+                        args.extend(["--asreproast", "-"])
+                proc = await asyncio.create_subprocess_exec(
+                    *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=240.0)
+                parsed_nxc = parse_netexec_output(stdout.decode("utf-8", errors="replace"), targets, proto)
+                all_findings.extend(parsed_nxc)
+                append_log("INFO", f"[NetExec/{proto.upper()}] Generati {len(parsed_nxc)} finding.")
+
+    # Enum4linux-ng
+    if payload.get("enable_enum4linux"):
+        update_progress(min(89, base_progress + 2), "Esecuzione Enum4linux-ng...")
+        if not tools["enum4linux_ng"]["installed"] or platform.system() == "Windows":
+            append_log("WARN", "[Enum4linux-ng] Esecuzione diretta disponibile su Linux con samba/rpcclient installati.")
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                out_prefix = str(Path(tmp) / "e4l")
+                e4l_args = [sys.executable, tools["enum4linux_ng"]["path"], "-A", "-oJ", out_prefix, targets.split(",")[0].strip()]
+                if username and password:
+                    e4l_args.extend(["-u", username, "-p", password])
+                proc = await asyncio.create_subprocess_exec(
+                    *e4l_args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=240.0)
+                jfile = Path(f"{out_prefix}.json")
+                if jfile.is_file():
+                    e_sum, e_findings = parse_enum4linux_ng_json(jfile.read_text(encoding="utf-8", errors="replace"), targets)
+                    internal_summary["enum4linux"] = e_sum
+                    all_findings.extend(e_findings)
+
+    # BloodHound AD Collector
+    if payload.get("enable_bloodhound"):
+        update_progress(min(89, base_progress + 4), "Raccolta grafo Active Directory (BloodHound)...")
+        if not tools["bloodhound"]["installed"]:
+            append_log("WARN", "[BloodHound] bloodhound-python non installato.")
+        elif not (domain and username and password):
+            append_log("WARN", "[BloodHound] Richiesti Domain, Username e Password AD per raccolta live.")
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                dc_ip = targets.split(",")[0].strip()
+                bh_args = [tools["bloodhound"]["path"], "-d", domain, "-u", username, "-p", password, "-c", "Default", "--zip"]
+                if dc_ip and _SAFE_ARG_RE.match(dc_ip):
+                    bh_args.extend(["-ns", dc_ip])
+                proc = await asyncio.create_subprocess_exec(
+                    *bh_args, cwd=tmp, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=300.0)
+                zips = list(Path(tmp).glob("*.zip"))
+                if zips:
+                    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                    dest_zip = EXPORTS_DIR / f"scan_{scan_id}.zip"
+                    shutil.copy2(zips[0], dest_zip)
+                    ad_sum, bh_findings = analyze_bloodhound_archive(dest_zip.read_bytes(), dest_zip.name)
+                    internal_summary["bloodhound"] = ad_sum
+                    internal_summary["export_available"] = True
+                    all_findings.extend(bh_findings)
+
+    # AzureHound Entra ID Collector
+    if payload.get("enable_azurehound"):
+        update_progress(min(89, base_progress + 6), "Raccolta identità Entra ID (AzureHound)...")
+        az_t = str(payload.get("azure_tenant_id") or "").strip()
+        az_c = str(payload.get("azure_client_id") or "").strip()
+        az_s = str(payload.get("azure_client_secret") or "").strip()
+        if not tools["azurehound"]["installed"]:
+            append_log("WARN", "[AzureHound] Binario azurehound non installato.")
+        elif not (az_t and az_c and az_s):
+            append_log("WARN", "[AzureHound] Richiesti Tenant ID, Client ID e Client Secret per raccolta live.")
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                out_json = Path(tmp) / "azurehound.json"
+                ah_args = [
+                    tools["azurehound"]["path"], "list",
+                    "--tenant", az_t, "--app", az_c, "--secret", az_s,
+                    "-o", str(out_json),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *ah_args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=300.0)
+                if out_json.is_file():
+                    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                    dest_zip = EXPORTS_DIR / f"scan_{scan_id}.zip"
+                    with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                        zf.write(out_json, arcname="azurehound.json")
+                    entra_sum, ah_findings = analyze_azurehound_json(out_json.read_bytes(), "azurehound.json")
+                    internal_summary["azurehound"] = entra_sum
+                    internal_summary["export_available"] = True
+                    all_findings.extend(ah_findings)
+
+    # Optional Responder / Passive LAN Sniffer
+    if payload.get("enable_responder"):
+        update_progress(min(89, base_progress + 7), "Audit broadcast LAN (LLMNR / NBT-NS / mDNS)...")
+        lan_sum, lan_findings = await run_lan_broadcast_audit(
+            duration_sec=int(payload.get("responder_duration_sec") or 30),
+            mode=str(payload.get("responder_mode") or "passive"),
+            active_authorized=bool(payload.get("responder_active_authorized")),
+            interface=str(payload.get("responder_interface") or ""),
+            log_callback=append_log,
+        )
+        internal_summary["lan_broadcast"] = lan_sum
+        all_findings.extend(lan_findings)
+
+    return internal_summary, all_findings
+
+
 async def _run_internal_ad_pipeline(scan_id: int, payload: Dict[str, Any]) -> None:
     conn = get_db_connection()
     logs: List[Dict[str, str]] = []
@@ -852,139 +1394,14 @@ async def _run_internal_ad_pipeline(scan_id: int, payload: Dict[str, Any]) -> No
             return
 
         targets = str(payload.get("targets") or "").strip()
-        domain = str(payload.get("domain") or "").strip()
-        username = str(payload.get("username") or "").strip()
-        password = str(payload.get("password") or "")
-        tools = detect_internal_tools()
-        all_findings: List[Dict[str, Any]] = []
-        internal_summary: Dict[str, Any] = {"targets": targets, "domain": domain}
-
-        # 1. NetExec
-        if payload.get("enable_netexec"):
-            update_progress(20, "Esecuzione NetExec (audit protocolli interni)...")
-            if not tools["netexec"]["installed"]:
-                append_log("WARN", "[NetExec] Binario non installato: installalo dalla barra Internal & AD.")
-            else:
-                protos = [p for p in (payload.get("netexec_protocols") or ["smb"]) if p in NETEXEC_PROTOCOLS]
-                checks = set(payload.get("netexec_checks") or [])
-                for proto in protos:
-                    args = [tools["netexec"]["path"], proto, targets]
-                    if username and password:
-                        args.extend(["-u", username, "-p", password])
-                        if domain:
-                            args.extend(["-d", domain])
-                    else:
-                        args.extend(["-u", "", "-p", ""])
-                    if proto == "smb":
-                        if "null_shares" in checks:
-                            args.append("--shares")
-                        if "pass_pol" in checks and username:
-                            args.append("--pass-pol")
-                    if proto == "ldap" and username:
-                        if "kerberoast" in checks:
-                            args.extend(["--kerberoasting", "-"])
-                        if "asrep" in checks:
-                            args.extend(["--asreproast", "-"])
-                    proc = await asyncio.create_subprocess_exec(
-                        *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=240.0)
-                    parsed_nxc = parse_netexec_output(stdout.decode("utf-8", errors="replace"), targets, proto)
-                    all_findings.extend(parsed_nxc)
-                    append_log("INFO", f"[NetExec/{proto.upper()}] Generati {len(parsed_nxc)} finding.")
-
-        # 2. Enum4linux-ng
-        if payload.get("enable_enum4linux"):
-            update_progress(45, "Esecuzione Enum4linux-ng...")
-            if not tools["enum4linux_ng"]["installed"] or platform.system() == "Windows":
-                append_log("WARN", "[Enum4linux-ng] Esecuzione diretta disponibile su Linux con samba/rpcclient installati.")
-            else:
-                with tempfile.TemporaryDirectory() as tmp:
-                    out_prefix = str(Path(tmp) / "e4l")
-                    e4l_args = [sys.executable, tools["enum4linux_ng"]["path"], "-A", "-oJ", out_prefix, targets.split(",")[0].strip()]
-                    if username and password:
-                        e4l_args.extend(["-u", username, "-p", password])
-                    proc = await asyncio.create_subprocess_exec(
-                        *e4l_args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await asyncio.wait_for(proc.communicate(), timeout=240.0)
-                    jfile = Path(f"{out_prefix}.json")
-                    if jfile.is_file():
-                        e_sum, e_findings = parse_enum4linux_ng_json(jfile.read_text(encoding="utf-8", errors="replace"), targets)
-                        internal_summary["enum4linux"] = e_sum
-                        all_findings.extend(e_findings)
-
-        # 3. BloodHound AD Collector
-        if payload.get("enable_bloodhound"):
-            update_progress(60, "Raccolta grafo Active Directory (BloodHound)...")
-            if not tools["bloodhound"]["installed"]:
-                append_log("WARN", "[BloodHound] bloodhound-python non installato.")
-            elif not (domain and username and password):
-                append_log("WARN", "[BloodHound] Richiesti Domain, Username e Password AD per raccolta live.")
-            else:
-                with tempfile.TemporaryDirectory() as tmp:
-                    dc_ip = targets.split(",")[0].strip()
-                    bh_args = [tools["bloodhound"]["path"], "-d", domain, "-u", username, "-p", password, "-c", "Default", "--zip"]
-                    if dc_ip and _SAFE_ARG_RE.match(dc_ip):
-                        bh_args.extend(["-ns", dc_ip])
-                    proc = await asyncio.create_subprocess_exec(
-                        *bh_args, cwd=tmp, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await asyncio.wait_for(proc.communicate(), timeout=300.0)
-                    zips = list(Path(tmp).glob("*.zip"))
-                    if zips:
-                        EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-                        dest_zip = EXPORTS_DIR / f"scan_{scan_id}.zip"
-                        shutil.copy2(zips[0], dest_zip)
-                        ad_sum, bh_findings = analyze_bloodhound_archive(dest_zip.read_bytes(), dest_zip.name)
-                        internal_summary["bloodhound"] = ad_sum
-                        internal_summary["export_available"] = True
-                        all_findings.extend(bh_findings)
-
-        # 3b. AzureHound Entra ID Collector
-        if payload.get("enable_azurehound"):
-            update_progress(70, "Raccolta identità Entra ID (AzureHound)...")
-            az_t = str(payload.get("azure_tenant_id") or "").strip()
-            az_c = str(payload.get("azure_client_id") or "").strip()
-            az_s = str(payload.get("azure_client_secret") or "").strip()
-            if not tools["azurehound"]["installed"]:
-                append_log("WARN", "[AzureHound] Binario azurehound non installato.")
-            elif not (az_t and az_c and az_s):
-                append_log("WARN", "[AzureHound] Richiesti Tenant ID, Client ID e Client Secret per raccolta live.")
-            else:
-                with tempfile.TemporaryDirectory() as tmp:
-                    out_json = Path(tmp) / "azurehound.json"
-                    ah_args = [
-                        tools["azurehound"]["path"], "list",
-                        "--tenant", az_t, "--app", az_c, "--secret", az_s,
-                        "-o", str(out_json),
-                    ]
-                    proc = await asyncio.create_subprocess_exec(
-                        *ah_args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await asyncio.wait_for(proc.communicate(), timeout=300.0)
-                    if out_json.is_file():
-                        EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-                        dest_zip = EXPORTS_DIR / f"scan_{scan_id}.zip"
-                        with zipfile.ZipFile(dest_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                            zf.write(out_json, arcname="azurehound.json")
-                        entra_sum, ah_findings = analyze_azurehound_json(out_json.read_bytes(), "azurehound.json")
-                        internal_summary["azurehound"] = entra_sum
-                        internal_summary["export_available"] = True
-                        all_findings.extend(ah_findings)
-
-        # 4. Responder / Passive LAN Sniffer
-        if payload.get("enable_responder"):
-            update_progress(78, "Audit broadcast LAN (LLMNR / NBT-NS / mDNS)...")
-            lan_sum, lan_findings = await run_lan_broadcast_audit(
-                duration_sec=int(payload.get("responder_duration_sec") or 30),
-                mode=str(payload.get("responder_mode") or "passive"),
-                active_authorized=bool(payload.get("responder_active_authorized")),
-                interface=str(payload.get("responder_interface") or ""),
-                log_callback=append_log,
-            )
-            internal_summary["lan_broadcast"] = lan_sum
-            all_findings.extend(lan_findings)
+        internal_summary, all_findings = await execute_internal_ad_modules(
+            scan_id=scan_id,
+            targets=targets,
+            payload=payload,
+            append_log=append_log,
+            update_progress=update_progress,
+            base_progress=20,
+        )
 
         # Persist Findings & Summary
         update_progress(92, "Consolidamento risultati Internal & AD Security...")

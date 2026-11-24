@@ -22,6 +22,7 @@ import { Organization, NSEScript, Scan, RemoteAgent, NatCheckResult, WordlistIte
 import { api } from '../services/api';
 import { useToast } from './UIFeedback';
 import { useI18n } from '../i18n/LanguageContext';
+import { InternalADPanel, InternalADConfig, DEFAULT_INTERNAL_AD_CONFIG } from './InternalADView';
 
 interface NewScanStudioProps {
   organizations: Organization[];
@@ -406,7 +407,9 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
     zap: true,
     native_web: true,
     native_net: true,
+    internal_ad: false,
   });
+  const [internalAdConfig, setInternalAdConfig] = useState<InternalADConfig>({ ...DEFAULT_INTERNAL_AD_CONFIG });
   const [zapMode, setZapMode] = useState<'baseline' | 'full'>('baseline');
 
   const [portSelection, setPortSelection] = useState<string>('top-1000');
@@ -454,6 +457,7 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       zap: prof.engines.includes('zap'),
       native_web: prof.engines.includes('native_web'),
       native_net: prof.engines.includes('native_net'),
+      internal_ad: false,
     };
     setEngines(newEngines);
 
@@ -593,6 +597,7 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
       enable_tech_fingerprint: enableTechFingerprint,
       enable_cve_intel: enableTechFingerprint ? enableCveIntel : false,
       enable_external_osint: enableExternalOsint,
+      ...(engines.internal_ad ? { internal_ad_config: internalAdConfig } : {}),
       config: {
         ports: portSelection === 'custom' ? customPorts : portSelection,
         nmap_flags: activeFlagsString,
@@ -1028,13 +1033,14 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
           <span>{L('3. Active Engine Selection', '3. Selezione Motori Operativi')}</span>
         </h2>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
           {[
             { id: 'nmap', label: 'Nmap 7.95 + NSE', desc: L('Port discovery, OS & script NSE', 'Port discovery, OS & script NSE') },
             { id: 'nuclei', label: 'Nuclei Engine', desc: L('Template matching CVE & misconfig', 'Template matching CVE & misconfig') },
             { id: 'zap', label: 'OWASP ZAP', desc: L('Integrated web DAST (deduped w/ Nuclei)', 'Web DAST integrato (no duplicati con Nuclei)') },
             { id: 'native_web', label: 'Native Web OWASP', desc: L('Headers, cookies, secrets, CORS', 'Headers, cookies, secrets, CORS') },
             { id: 'native_net', label: 'Native Network/SSL', desc: L('TLS cipher, certificates & banner', 'Cipher TLS, certificati & banner') },
+            { id: 'internal_ad', label: 'Internal & AD', desc: L('Responder, NetExec, Enum4linux, BloodHound/Entra', 'Responder, NetExec, Enum4linux, BloodHound/Entra') },
           ].map((item) => (
             <label
               key={item.id}
@@ -1057,6 +1063,16 @@ export const NewScanStudio: React.FC<NewScanStudioProps> = ({
           ))}
         </div>
       </div>
+
+      {/* Internal & AD Security Module (6th Engine Panel — Opt-In) */}
+      {engines.internal_ad && (
+        <InternalADPanel
+          orgId={orgId}
+          value={internalAdConfig}
+          onChange={setInternalAdConfig}
+          onScanCreated={onScanCreated}
+        />
+      )}
 
       {/* ZenMap++ Nmap & NSE Studio */}
       {engines.nmap && (

@@ -480,6 +480,26 @@ export interface InternalADCatalog {
   netexec_checks: string[];
 }
 
+export interface NetworkInterfaceItem {
+  name: string;
+  ip: string;
+  label: string;
+}
+
+export interface ResponderSessionStatus {
+  running: boolean;
+  mode: 'passive' | 'active';
+  interface: string;
+  bind_ip: string;
+  started_at: string;
+  elapsed_sec: number;
+  hosts_seen: string[];
+  protocols_seen: string[];
+  packets_count: number;
+  logs: Array<{ time: string; level: string; msg: string }>;
+  error: string;
+}
+
 export interface InternalADSummary {
   targets?: string;
   domain?: string;

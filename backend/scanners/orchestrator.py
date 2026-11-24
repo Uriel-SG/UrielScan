@@ -11,6 +11,7 @@ from backend.scanners.zap_engine import detect_zap, run_zap_scan, _format_web_ur
 from backend.scanners.recon_engine import run_subraptor_pipeline, run_feroxbuster_scan
 from backend.scanners.tech_cve_engine import run_tech_fingerprint, run_cve_intel_correlation
 from backend.scanners.osint_engine import run_external_osint
+from backend.scanners.internal_ad_engine import execute_internal_ad_modules
 from backend.scanners.deduplicator import consolidate_findings
 from backend.scanners.nat_guard import (
     check_targets_nat_loopback,
@@ -28,6 +29,21 @@ from backend.ai_engine import analyze_findings
 STOP_FLAGS: Dict[int, bool] = {}
 SCAN_THREADS: Dict[int, threading.Thread] = {}
 SCAN_CONCURRENCY_SEM = threading.Semaphore(3)
+_EPHEMERAL_SCAN_SECRETS: Dict[int, Dict[str, str]] = {}
+_EPHEMERAL_SECRETS_LOCK = threading.Lock()
+
+
+def store_ephemeral_scan_secrets(scan_id: int, secrets_map: Dict[str, str]) -> None:
+    """Hold sensitive per-scan credentials in memory only until the scan worker pops them."""
+    if not secrets_map:
+        return
+    with _EPHEMERAL_SECRETS_LOCK:
+        _EPHEMERAL_SCAN_SECRETS[int(scan_id)] = dict(secrets_map)
+
+
+def _pop_ephemeral_scan_secrets(scan_id: int) -> Dict[str, str]:
+    with _EPHEMERAL_SECRETS_LOCK:
+        return _EPHEMERAL_SCAN_SECRETS.pop(int(scan_id), {})
 
 
 def start_scan_in_background(scan_id: int) -> None:
@@ -561,6 +577,31 @@ async def run_scan_pipeline(scan_id: int) -> None:
         if STOP_FLAGS.get(scan_id, False):
             return
 
+        ephemeral_secrets = _pop_ephemeral_scan_secrets(scan_id)
+        internal_ad_summary: Optional[Dict[str, Any]] = None
+        if "internal_ad" in engines or isinstance(config.get("internal_ad_config"), dict):
+            iad_payload = dict(config.get("internal_ad_config") or {})
+            if ephemeral_secrets:
+                iad_payload.update(ephemeral_secrets)
+            if not iad_payload:
+                iad_payload = {"enable_netexec": True, "netexec_protocols": ["smb", "ldap"]}
+            append_log("INFO", "[Internal & AD] Avvio moduli interni (NetExec / Enum4linux-ng / BloodHound / AzureHound)...")
+            iad_sum, iad_findings = await execute_internal_ad_modules(
+                scan_id=scan_id,
+                targets=targets,
+                payload=iad_payload,
+                append_log=append_log,
+                update_progress=update_progress,
+                base_progress=84,
+            )
+            if iad_sum:
+                internal_ad_summary = iad_sum
+            if iad_findings:
+                all_findings.extend(iad_findings)
+
+        if STOP_FLAGS.get(scan_id, False):
+            return
+
         # -------------------------------------------------------------
         # 5. Summary, Cross-Engine Deduplication & Risk Score Calculation
         # -------------------------------------------------------------
@@ -641,6 +682,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
             "nat_guard": nat_stats,
             "routing": routing_meta,
             **({"recon": recon_summary} if recon_summary else {}),
+            **({"internal_ad": internal_ad_summary} if internal_ad_summary else {}),
         }
 
         with conn:
@@ -736,6 +778,7 @@ async def run_scan_pipeline(scan_id: int) -> None:
                 WHERE id = ?;
             """, (err_msg, now_iso, json.dumps(logs), scan_id))
     finally:
+        _pop_ephemeral_scan_secrets(scan_id)
         SCAN_THREADS.pop(scan_id, None)
         STOP_FLAGS.pop(scan_id, None)
         conn.close()

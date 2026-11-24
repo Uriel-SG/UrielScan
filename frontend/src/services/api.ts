@@ -20,6 +20,8 @@ import {
   CloudCatalog,
   CloudProfile,
   InternalADCatalog,
+  NetworkInterfaceItem,
+  ResponderSessionStatus,
 } from '../types';
 
 const API_BASE = '/api';
@@ -818,6 +820,7 @@ export const api = {
     enable_tech_fingerprint?: boolean;
     enable_cve_intel?: boolean;
     enable_external_osint?: boolean;
+    internal_ad_config?: Record<string, any>;
   }): Promise<Scan> {
     const res = await fetch(`${API_BASE}/scans`, {
       method: 'POST',
@@ -1282,6 +1285,50 @@ export const api = {
       headers: getAuthHeaders(false),
     });
     if (!res.ok) throw new Error('Failed to load Internal & AD catalog');
+    return await res.json();
+  },
+
+  async getInternalInterfaces(): Promise<NetworkInterfaceItem[]> {
+    const res = await fetch(`${API_BASE}/internal/interfaces`, {
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Failed to load network interfaces');
+    const data = await res.json();
+    return Array.isArray(data?.interfaces) ? data.interfaces : [];
+  },
+
+  async getResponderStatus(): Promise<ResponderSessionStatus> {
+    const res = await fetch(`${API_BASE}/internal/responder/status`, {
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Failed to load Responder status');
+    return await res.json();
+  },
+
+  async startResponder(payload: {
+    mode: 'passive' | 'active';
+    active_authorized: boolean;
+    interface: string;
+    bind_ip: string;
+  }): Promise<ResponderSessionStatus> {
+    const res = await fetch(`${API_BASE}/internal/responder/start`, {
+      method: 'POST',
+      headers: getAuthHeaders(true),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Impossibile avviare Responder' }));
+      throw new Error(err.detail || 'Impossibile avviare Responder');
+    }
+    return await res.json();
+  },
+
+  async stopResponder(): Promise<ResponderSessionStatus> {
+    const res = await fetch(`${API_BASE}/internal/responder/stop`, {
+      method: 'POST',
+      headers: getAuthHeaders(false),
+    });
+    if (!res.ok) throw new Error('Impossibile fermare Responder');
     return await res.json();
   },
 

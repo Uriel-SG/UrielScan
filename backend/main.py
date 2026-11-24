@@ -67,6 +67,10 @@ from backend.scanners.internal_ad_engine import (
     NETEXEC_CHECKS,
     detect_internal_tools,
     install_internal_tool,
+    list_network_interfaces,
+    get_responder_session_status,
+    start_responder_session,
+    stop_responder_session,
     analyze_bloodhound_archive,
     analyze_azurehound_json,
     start_internal_ad_scan_in_background,
@@ -83,7 +87,7 @@ from backend.scanners.tor_engine import (
 )
 from backend.scanners.engine_bootstrap import get_bootstrap_state, start_engine_bootstrap_background
 from backend.scanners.deduplicator import consolidate_findings
-from backend.scanners.orchestrator import start_scan_in_background, stop_scan
+from backend.scanners.orchestrator import start_scan_in_background, stop_scan, store_ephemeral_scan_secrets
 from backend.scanners.nat_guard import check_targets_nat_loopback
 from backend.probe_packager import build_windows_msi, build_linux_sh
 from backend.ai_engine import test_ai_connection, analyze_findings
@@ -276,6 +280,7 @@ class ScanCreateModel(BaseModel):
     enable_tech_fingerprint: Optional[bool] = True
     enable_cve_intel: Optional[bool] = True
     enable_external_osint: Optional[bool] = True
+    internal_ad_config: Optional[Dict[str, Any]] = None
 
 
 class ProxyTestRequest(BaseModel):
@@ -336,6 +341,13 @@ class InternalADScanCreateModel(BaseModel):
     responder_active_authorized: bool = False
     responder_duration_sec: int = 30
     responder_interface: Optional[str] = ""
+
+
+class ResponderStartModel(BaseModel):
+    mode: str = "passive"
+    active_authorized: bool = False
+    interface: str = "all"
+    bind_ip: str = "0.0.0.0"
 
 
 class ProbeHeartbeatModel(BaseModel):
@@ -684,6 +696,34 @@ async def get_internal_catalog_endpoint():
         "netexec_protocols": NETEXEC_PROTOCOLS,
         "netexec_checks": NETEXEC_CHECKS,
     }
+
+
+@app.get("/api/internal/interfaces")
+async def get_internal_interfaces_endpoint():
+    return {"interfaces": list_network_interfaces()}
+
+
+@app.get("/api/internal/responder/status")
+async def get_responder_status_endpoint():
+    return get_responder_session_status()
+
+
+@app.post("/api/internal/responder/start")
+async def start_responder_endpoint(payload: ResponderStartModel):
+    try:
+        return start_responder_session(
+            mode=payload.mode,
+            active_authorized=payload.active_authorized,
+            interface=payload.interface,
+            bind_ip=payload.bind_ip,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/internal/responder/stop")
+async def stop_responder_endpoint():
+    return stop_responder_session()
 
 
 @app.post("/api/internal/install/{tool_name}")
@@ -1396,6 +1436,15 @@ async def create_and_start_scan(payload: ScanCreateModel):
     if payload.enable_external_osint is not None:
         cfg["enable_external_osint"] = bool(payload.enable_external_osint)
 
+    ephemeral_internal_secrets: Dict[str, str] = {}
+    if isinstance(payload.internal_ad_config, dict):
+        sanitized_iad = dict(payload.internal_ad_config)
+        for secret_key in ("password", "azure_client_secret"):
+            val = sanitized_iad.pop(secret_key, None)
+            if isinstance(val, str) and val:
+                ephemeral_internal_secrets[secret_key] = val
+        cfg["internal_ad_config"] = sanitized_iad
+
     profile = payload.scan_type or payload.scan_profile or "standard"
 
     from datetime import datetime, timezone
@@ -1434,6 +1483,8 @@ async def create_and_start_scan(payload: ScanCreateModel):
 
     if not is_remote:
         # Launch local scan in background
+        if ephemeral_internal_secrets:
+            store_ephemeral_scan_secrets(scan_id, ephemeral_internal_secrets)
         start_scan_in_background(scan_id)
 
     return get_scan_by_id(scan_id)

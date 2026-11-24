@@ -2152,6 +2152,64 @@ def test_internal_ad_netexec_enum4linux_bloodhound_azurehound_responder(monkeypa
         doc_xml = zf.read("word/document.xml").decode("utf-8")
         assert "Internal Network, Active Directory" in doc_xml and "BloodHound AD" in doc_xml and "AzureHound Entra ID" in doc_xml
 
+    # 7. Standalone Decoupled Responder & Network Interfaces endpoints
+    ifaces_resp = client.get("/api/internal/interfaces")
+    assert ifaces_resp.status_code == 200
+    ifaces = ifaces_resp.json().get("interfaces") or []
+    assert any(i.get("name") == "all" and i.get("ip") == "0.0.0.0" for i in ifaces)
+
+    resp_denied = client.post("/api/internal/responder/start", json={
+        "mode": "active",
+        "active_authorized": False,
+        "interface": "all",
+        "bind_ip": "0.0.0.0",
+    })
+    assert resp_denied.status_code == 400
+
+    resp_start = client.post("/api/internal/responder/start", json={
+        "mode": "passive",
+        "active_authorized": False,
+        "interface": "all",
+        "bind_ip": "127.0.0.1",
+    })
+    assert resp_start.status_code == 200
+    assert resp_start.json()["running"] is True
+
+    resp_st = client.get("/api/internal/responder/status")
+    assert resp_st.status_code == 200 and resp_st.json()["running"] is True
+
+    resp_stop = client.post("/api/internal/responder/stop")
+    assert resp_stop.status_code == 200 and resp_stop.json()["running"] is False
+
+    # 8. Unified /api/scans accepts engines=['nmap', 'internal_ad'] + internal_ad_config and strips plaintext secrets from DB
+    import backend.main as _m_scans
+    monkeypatch.setattr(_m_scans, "start_scan_in_background", lambda sid: None)
+    combined_scan = client.post("/api/scans", json={
+        "org_id": 1,
+        "name": "Combined Nmap + Internal AD Scan",
+        "targets": "192.168.10.0/24",
+        "engines": ["nmap", "internal_ad"],
+        "internal_ad_config": {
+            "domain": "CORP.LOCAL",
+            "username": "audit.svc",
+            "password": "SuperSecretADPassword!",
+            "enable_netexec": True,
+            "netexec_protocols": ["smb", "ldap"],
+            "enable_azurehound": True,
+            "azure_tenant_id": "t-1",
+            "azure_client_id": "c-1",
+            "azure_client_secret": "SuperSecretEntra!",
+        },
+    })
+    assert combined_scan.status_code == 201
+    comb_data = combined_scan.json()
+    assert "internal_ad" in comb_data["engines"] and "nmap" in comb_data["engines"]
+    iad_cfg = comb_data["config"].get("internal_ad_config") or {}
+    assert iad_cfg.get("domain") == "CORP.LOCAL"
+    assert "password" not in iad_cfg and "azure_client_secret" not in iad_cfg
+
+
+
 
 def test_external_osint_shodan_rdap_greynoise_and_reports(monkeypatch):
     import asyncio
