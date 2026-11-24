@@ -4,13 +4,13 @@
 <img width="376" height="256" alt="urielscan-logo" src="https://github.com/user-attachments/assets/415d8f3d-b0e9-4a8f-b2a6-83ac81155a37" />
 </p>
 
-**UrielScan** is an open-source Vulnerability Assessment & Purple Team platform designed to combine **Network Scanning (Nmap + NSE)**, **Web Vulnerability Scanning (Nuclei + OWASP ZAP)**, and an **Asynchronous Native Engine** with cross-engine deduplication, **Tor Onion / Custom SOCKS5-HTTP Proxy routing**, **NAT Loopback Guard**, **Self-Contained Remote Probe Installers (`.msi` / `.sh`)**, bilingual `EN / IT` multi-theme UI, and white-label dual-logo reporting for **MSP/MSSP** operations.
+**UrielScan** is an open-source Vulnerability Assessment & Purple Team platform designed to combine **Network Scanning (Nmap + NSE)**, **Web Vulnerability Scanning (Nuclei + OWASP ZAP)**, **Cloud Security Posture Management (Prowler CSPM)**, **Internal Network / Active Directory / Entra ID Security (NetExec, Enum4linux-ng, BloodHound, AzureHound, Responder)**, **Passive External OSINT (Shodan InternetDB, RIPEstat, GreyNoise)**, and an **Asynchronous Native Engine** with cross-engine deduplication, **Tor Onion / Custom SOCKS5-HTTP Proxy routing**, **NAT Loopback Guard**, **Self-Contained Remote Probe Installers (`.msi` / `.sh`)**, bilingual `EN / IT` multi-theme UI, and white-label dual-logo reporting for **MSP/MSSP** operations.
 
 <img width="1917" height="1198" alt="Screenshot 2026-11-22 154719" src="https://github.com/user-attachments/assets/3493d065-cadc-4199-821b-1ae4c5159eac" />
 
 ## Quick Start (Windows & Linux)
 
-### 1. First-Time Setup (Python `.venv` + All Engines: Nmap, Nuclei, OWASP ZAP + JRE 17, Tor)
+### 1. First-Time Setup (Python `.venv` + All Engines: Nmap, Nuclei, OWASP ZAP + JRE 17, Tor, Prowler)
 - **Windows** (double-click or terminal):
   ```powershell
   .\install.bat
@@ -60,8 +60,23 @@ Disabled by default and selectable per-scan in **New Scan Studio**:
 - **Directory Enumeration (`Feroxbuster`)**: High-speed wildcard-filtered content discovery with SecLists (`DirBuster-2007_directory-list-2.3-medium.txt` / `big.txt`) or custom `.txt` upload, configurable rate/time/max-depth limits, and proxy/Tor support.
 - **Standalone Tech Stack Fingerprinting (`Wappalyzer / httpx + HTML/Headers + Nmap CPE`)**: Runs independently of SubRaptor on both external and internal/LAN targets, combining `httpx -tech-detect`, HTTP header/HTML/cookie version extraction, and Nmap `<cpe>` fusion into a unified Technology Stack inventory in UI and HTML/PDF/DOCX reports.
 - **CVE, CISA KEV, EPSS & PoC-in-GitHub Intelligence**: Correlates versioned components against **NVD API v2**, **CISA KEV**, **FIRST EPSS**, and **PoC-in-GitHub** with a 24h local SQLite cache (`cve_intel_cache`), attaching public PoC URLs and transparent `VERSION-BASED` labeling (deduplicated below active Nuclei/ZAP findings).
+- **External OSINT Intelligence (`Shodan InternetDB + RIPEstat + GreyNoise Community API`)**: Free, zero-API-key passive enrichment for public global IPs (RFC1918/loopback targets are automatically skipped) with 24h local SQLite caching — retrieving ASN/organization/CIDR prefix, passively indexed open ports/CPEs/tags/CVEs, and GreyNoise scanner reputation.
 
 <img width="1916" height="1198" alt="image" src="https://github.com/user-attachments/assets/5646b324-d4e1-40f0-8c83-340d08cc016a" />
+
+## Cloud Security Posture Management (Prowler CSPM)
+
+Accessible directly under **New Scan → Cloud Security**, UrielScan integrates **Prowler CSPM** (auto-bootstrapped in `.venv`/PATH during first-time installation and on startup):
+- **Multi-Cloud & Encrypted Credential Profiles**: Store encrypted AWS (`AccessKey` / `RoleARN` / `Profile`), Azure (`Service Principal`), GCP (`Service Account JSON`), Microsoft 365 (`App Registration`), or Kubernetes (`Kubeconfig`) profiles in SQLite (`cloud_profiles`).
+- **Compliance & OCSF Ingestion**: Audit against **CIS**, **SOC 2**, **ISO 27001**, **GDPR**, **HIPAA**, **PCI-DSS**, and **NIST** frameworks; ingest Prowler OCSF JSON results into a dedicated per-service pass-rate dashboard and full CSPM report tables.
+
+## Internal Network, Active Directory & Entra ID Security
+
+Accessible under **Cloud Security → Internal & AD**, UrielScan provides a dedicated internal LAN, Active Directory, and Microsoft Entra ID assessment suite:
+- **Modular NetExec (`nxc`) Orchestration**: Select target protocol (`SMB`, `LDAP`, `WinRM`, `RDP`, `MSSQL`, `SSH`) and toggleable audit flags (Signing/Null Sessions, Shares, Users/Groups, Password Policy, Kerberoasting/ASREPRoast, ADCS Certificate Templates, SAM/LSA, local admin reuse) with optional domain/local credentials.
+- **Enum4linux-ng Enumeration**: Full SMB/RPC/NetBIOS share, user, group, and password policy audit — automatically flagging readable sensitive network shares and anonymous/null-session exposures in findings and reports.
+- **BloodHound AD & AzureHound Entra ID**: Run automated collectors (`bloodhound-python` / `BloodHound.py` and `azurehound`) or upload offline `.zip`/`.json` archives for native attack-path analysis (Kerberoastable accounts, ASREPRoastable users, Unconstrained/Constrained Delegation, Dangerous ACLs such as `GenericAll`/`WriteDacl`/`WriteOwner`, Tier-0 Entra ID privileged roles, and risky App/Graph permissions), plus one-click `.zip` export for the BloodHound GUI.
+- **Responder LAN Broadcast Audit (Passive Default)**: Safe, non-invasive **Passive UDP Sniffer** by default (listens on UDP `137`, `5353`, `5355` to detect LLMNR/NBNS/mDNS poisoning exposure without injecting packets). Optional **Active Mode** (`-A`/full Responder) requires an explicit authorization checkbox, displays a clear risk warning dialog, and is enforced by backend API & engine validation (`HTTP 400` / `ValueError` without client authorization).
 
 ## NAT Loopback Guard & Cross-Engine Deduplication
 
@@ -70,7 +85,7 @@ Disabled by default and selectable per-scan in **New Scan Studio**:
 
 ## Reporting, AI Analyst & Archive
 
-- **White-Label Reports & Exports**: Generate **HTML**, **PDF**, **DOCX**, **CSV**, and **TXT** reports with Provider + Client dual branding and persistent Saved Report history.
+- **White-Label Reports & Exports**: Generate **HTML**, **PDF**, **DOCX**, **CSV**, and **TXT** reports with Provider + Client dual branding, persistent Saved Report history, and dedicated tables for **Attack Surface & Tech Stack**, **CVE/KEV/PoC Intel**, **External OSINT**, **Cloud Security Posture (Prowler CSPM)**, and **Internal Network / AD / Entra ID**.
 - **Purple Team AI Analyst**: Supports **Google Gemini**, **OpenAI**, **Anthropic Claude**, **Ollama (Local)**, and a built-in **Offline Heuristic Engine**, with persistent Saved AI Analyses history and executive/single-finding insights.
 - **Authentication**: Admin login (`admin:admin` on first boot) with optional **2FA TOTP (RFC 6238)** QR setup and password management.
 
@@ -106,8 +121,11 @@ Disabled by default and selectable per-scan in **New Scan Studio**:
   - [`backend/scanners/nuclei_engine.py`](backend/scanners/nuclei_engine.py): Nuclei integration with cross-platform auto-installer and `-proxy` routing.
   - [`backend/scanners/zap_engine.py`](backend/scanners/zap_engine.py): OWASP ZAP integration (Daemon API / headless CLI + portable Temurin JRE 17 auto-provisioning) with SOCKS5/HTTP proxy config.
   - [`backend/scanners/tor_engine.py`](backend/scanners/tor_engine.py): Managed Tor Expert Bundle lifecycle, RFC 1928 SOCKS5 / HTTP CONNECT tunneling, Exit IP probe, and circuit rotation.
-  - [`backend/scanners/engine_bootstrap.py`](backend/scanners/engine_bootstrap.py): Automatic startup & CLI provisioning for Nmap, Nuclei, OWASP ZAP, and Tor (`bin/`).
+  - [`backend/scanners/engine_bootstrap.py`](backend/scanners/engine_bootstrap.py): Automatic startup & CLI provisioning for Nmap, Nuclei, OWASP ZAP, Tor, and **Prowler** (`bin/` / `.venv`).
   - [`backend/scanners/native_engine.py`](backend/scanners/native_engine.py): Asynchronous TCP/Banner scanner, SSL/TLS Inspector, and OWASP Web Security Analyzer (with SOCKS5h/HTTP proxy support).
+  - [`backend/scanners/prowler_engine.py`](backend/scanners/prowler_engine.py): Multi-cloud CSPM engine (Prowler OCSF parser + encrypted Cloud Profile management).
+  - [`backend/scanners/internal_ad_engine.py`](backend/scanners/internal_ad_engine.py): Internal LAN & AD/Entra ID suite (modular NetExec flags, Enum4linux-ng parser, BloodHound & AzureHound analyzers, passive-default Responder UDP sniffer & active authorization guard).
+  - [`backend/scanners/osint_engine.py`](backend/scanners/osint_engine.py): Free passive external OSINT enrichment via Shodan InternetDB, RIPEstat, and GreyNoise Community API (`is_global` IP guard + 24h cache).
   - [`backend/scanners/recon_engine.py`](backend/scanners/recon_engine.py), [`backend/scanners/wordlists.py`](backend/scanners/wordlists.py) & [`backend/scanners/tech_cve_engine.py`](backend/scanners/tech_cve_engine.py): SubRaptor, `httpx`, Subzy, Feroxbuster, standalone Wappalyzer/CPE Tech Fingerprinting, and NVD/CISA KEV/EPSS/PoC-in-GitHub correlation.
   - [`backend/scanners/nat_guard.py`](backend/scanners/nat_guard.py) & [`backend/scanners/deduplicator.py`](backend/scanners/deduplicator.py): WAN hairpin detection and cross-engine finding deduplication.
   - [`backend/ai_engine.py`](backend/ai_engine.py), [`backend/report_engine.py`](backend/report_engine.py), [`backend/export_engine.py`](backend/export_engine.py) & [`backend/scheduler.py`](backend/scheduler.py): Multi-LLM analyst, white-label HTML/DOCX/PDF/CSV/TXT generators, and cron/interval scan scheduler.
